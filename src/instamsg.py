@@ -26,13 +26,13 @@ INSTAMSG_QOS2 = 2
 
 class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
-    INSTAMSG_KEEP_ALIVE_TIMER = 60
+    INSTAMSG_KEEP_ALIVE_TIMER = 300
     INSTAMSG_RECONNECT_TIMER = 90
-    INSTAMSG_HOST = "localhost"
+    INSTAMSG_HOST = "test.ioeye.com"
     # INSTAMSG_HOST = "api.instamsg.io"
     INSTAMSG_PORT = 1883
     INSTAMSG_PORT_SSL = 8883
-    INSTAMSG_HTTP_HOST = "localhost"
+    INSTAMSG_HTTP_HOST = "test.ioeye.com"
     # INSTAMSG_HTTP_HOST = 'api.instamsg.io'
     INSTAMSG_HTTP_PORT = 8600
     # INSTAMSG_HTTP_PORT = 80
@@ -65,6 +65,7 @@ class InstaMsg:
             self.__mqttClient.onDisconnect(self.__onDisConnect)
             self.__mqttClient.onDebugMessage(self.__handleDebugMessage)
             self.__mqttClient.onMessage(self.__handleMessage)
+            time.sleep(5)
             self.__mqttClient.connect()
         else:
             self.__mqttClient = None
@@ -110,7 +111,7 @@ class InstaMsg:
             self.__subscribers = None
             return 1
         except:
-            return -1
+            return - 1
     
     def publish(self, topic, msg, qos=INSTAMSG_QOS0, dup=0, resultHandler=None, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
         if(topic):
@@ -494,8 +495,8 @@ class MqttClient:
         self.__disconnecting = 0
         self.__waitingReconnect = 0
         self.__nextConnTry = time.time()
-        self.__nextPingReqTime = time.time()
-        self.__lastPingRespTime = self.__nextPingReqTime
+        self.__lastPingReqTime = time.time()
+        self.__lastPingRespTime = self.__lastPingReqTime
         self.__mqttMsgFactory = MqttMsgFactory()
         self.__mqttEncoder = MqttEncoder()
         self.__mqttDecoder = MqttDecoder()
@@ -513,10 +514,13 @@ class MqttClient:
                 self.connect()
                 if(self.__sockInit):
                     self.__receive()
-                    if (self.__nextPingReqTime - time.time() <= 0):
-                        if (self.__nextPingReqTime - self.__lastPingRespTime > self.keepAliveTimer):
+                    if (self.__connected and (self.__lastPingReqTime + self.keepAliveTimer < time.time())):
+                        if (self.__lastPingRespTime is None):
                             self.disconnect()
-                        else: self.__sendPingReq()
+                        else: 
+                            self.__sendPingReq()
+                            self.__lastPingReqTime = time.time()
+                            self.__lastPingRespTime = None
                 self.__processHandlersTimeout()
         except SocketError, msg:
             self.__resetInitSockNConnect()
@@ -557,7 +561,6 @@ class MqttClient:
             except Exception, msg:
                 self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
         finally:
-            self.__closeSocket()
             self.__resetInitSockNConnect()
     
     def publish(self, topic, payload, qos=MQTT_QOS0, dup=0, resultHandler=None, resultHandlerTimeout=MQTT_RESULT_HANDLER_TIMEOUT, retain=0):
@@ -685,7 +688,10 @@ class MqttClient:
             
     def __receive(self):
         try:
-            data = self.__sock.recv(self.MAX_BYTES_MDM_READ)
+            remainingBytes, data = self.__sock.recv(self.MAX_BYTES_MDM_READ)
+            while (remainingBytes > len(data)):
+                r, moreData = self.__sock.recv(self.MAX_BYTES_MDM_READ)
+                data = data + moreData
             if data: 
                 mqttMsg = self.__mqttDecoder.decode(data)
             else:
@@ -793,6 +799,8 @@ class MqttClient:
         self.__sockInit = 0
         self.__connected = 0
         self.__connecting = 0
+        self.__lastPingReqTime = time.time()
+        self.__lastPingRespTime = self.__lastPingReqTime
         
     
     def __initSock(self):
@@ -808,7 +816,7 @@ class MqttClient:
             if(self.__sock is not None):
                 self.__closeSocket()
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Opening socket to %s:%s' % (self.host, str(self.port)))
-            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, self.keepAlive)
+            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT)
             self.__sock.connect((self.host, self.port))
             self.__sockInit = 1
             self.__waitingReconnect = 0
@@ -845,7 +853,6 @@ class MqttClient:
         pingReqMsg = self.__mqttMsgFactory.message(fixedHeader)
         encodedMsg = self.__mqttEncoder.ecode(pingReqMsg)
         self.__sendall(encodedMsg)
-        self.__nextPingReqTime = time.time() + self.keepAliveTimer
     
 ####Mqtt Codec ###############################################################################
 
@@ -1002,7 +1009,7 @@ class MqttDecoder:
             lsb = self.__getByteStr()
             intMsbLsb = ord(msb) << 8 | ord(lsb)
         if (intMsbLsb < 0 or intMsbLsb > MqttClient.MQTT_MAX_INT):
-            return -1
+            return - 1
         else:
             return intMsbLsb
         
@@ -1763,6 +1770,7 @@ class HTTPClient:
         
 ####Socket class ###############################################################################
 class Socket:
+    default_keep_alive = 0
     maxconn = 6
     connected = 0
     accepting = 0
@@ -1776,7 +1784,8 @@ class Socket:
     socketStates[4] = "Socket listening."
     socketStates[5] = "Socket with an incoming connection. Waiting for the accept or shutdown command."
     
-    def __init__(self, timeout, keepAlive=10):
+    def __init__(self, timeout, keepAlive=default_keep_alive):
+        if(keepAlive < 0 or keepAlive > 240): raise SocketError("Keep alive should be between 0-240")
         self._timeout = timeout or 10  # sec
         self._keepAlive = keepAlive 
         self._listenAutoRsp = 0
@@ -1797,9 +1806,9 @@ class Socket:
             if(self._sockno):
                 at.configureSocket(connId=self._sockno, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp)
             else:
-                raise SocketMaxCountError('Socket::All sockets in use. Total number of socket cannot exceed %d.' % self.maxconn)
+                raise SocketMaxCountError('All sockets in use. Total number of socket cannot exceed %d.' % self.maxconn)
         except:
-            raise SocketConfigError('Socket::Unable to configure socket')
+            raise SocketConfigError('Unable to configure socket')
         
     def __socketStatus(self):
         return int(at.socketStatus(self._sockno).split(',')[1])
@@ -1814,7 +1823,7 @@ class Socket:
         except(SocketMaxCountError, SocketConfigError), msg:
             raise SocketError(str(msg))
         except:
-            raise SocketError('Socket::Unable to connect to remote host %s' % str(addr))
+            raise SocketError('Unable to connect to remote host %s' % str(addr))
         
     def listen(self, addr):
 # Telit module only allows one connection at a time on a listening socket.
@@ -1840,15 +1849,15 @@ class Socket:
         except(SocketMaxCountError, SocketConfigError), msg:
             raise SocketError(str(msg))
         except at.timeout:
-            raise SocketTimeoutError('Socket:: HTTP Get Timed out.')
+            raise SocketTimeoutError('HTTP Get Timed out.')
         except:
-            raise SocketError('Socket::Error in HTTP Get.')
+            raise SocketError('Error in HTTP Get.')
     
     def accept(self):
         try:
             at.socketAccept(self._sockno)
         except:
-            raise SocketError('Socket:: Error in connection accept.')  
+            raise SocketError('Error in connection accept.')  
                      
     def close(self):
         try:
@@ -1859,7 +1868,7 @@ class Socket:
             at.closeSocket(self._sockno)
             self.connected = 0
         except:
-            raise SocketError('Socket::Unable to close socket %d' % self._sockno)
+            raise SocketError('Unable to close socket %d' % self._sockno)
   
     def recv(self, bufsize):
         try:
@@ -1869,11 +1878,11 @@ class Socket:
                 if(bufsize > 1500 or bufsize < 0):bufsize = 1500
                 return at.socketRecv(self._sockno, bufsize, self._timeout + 3)
             else:
-                return ''
+                return (0,'')
         except at.timeout:
-            raise SocketTimeoutError('Socket:: Timed out.')
-        except:
-            raise SocketError('Socket::Error in recv data.')
+            raise SocketTimeoutError('Timed out.')
+        except Exception, e:
+            raise SocketError('Error in recv data - %s' % str(e))
 
     def send(self, data):
         try:
@@ -1882,9 +1891,9 @@ class Socket:
             data = data[:1500]
             return at.socketSend(self._sockno, data, len(data), self._timeout + 3, 0)
         except at.timeout:
-            raise SocketTimeoutError('Socket:: Timed out.')
+            raise SocketTimeoutError('Timed out.')
         except:
-            raise SocketError('Socket::Error in send data.')
+            raise SocketError('Error in send data.')
                  
     def sendall(self, data):
         try:
@@ -1897,9 +1906,9 @@ class Socket:
                 data = data[sendDataSize:]
                 i = i + 1
         except at.timeout:
-            raise SocketTimeoutError('Socket:: Timed out.')
+            raise SocketTimeoutError('Timed out.')
         except:
-            raise SocketError('Socket::Error in sendall data.')  
+            raise SocketError('Error in sendall data.')  
 
 
 
@@ -1969,14 +1978,13 @@ class TimeHelper:
 class Modem:
     DEFAULT_NTP_PORT = 23
     
-    def __init__(self, settings, onDebugMessageCallBack = None):  
+    def __init__(self, settings, onDebugMessageCallBack=None):  
         if(onDebugMessageCallBack is not None and not callable(onDebugMessageCallBack)): raise ValueError('[Modem]:: onDebugMessageCallBack should be a callable object.') 
         try:
             self.__onDebugMessageCallBack = onDebugMessageCallBack
             self.__log(INSTAMSG_LOG_LEVEL_INFO, "[Modem]:: Configuring modem...")
             self.__initOptions(settings)
-            self.state = 0
-            self.__init()
+            self.state = self.__init()
             self.__setPowerMode()
             self.__setFireWall() 
             self.__initGPRSConnection()
@@ -1988,14 +1996,14 @@ class Modem:
         except Exception, e:
             raise ModemError("[Modem]:: Error while initializing modem. %s" % str(e))
         
-    def state(self):
+    def getState(self):
         return self.state
     
     def getSignalQuality(self):
         try:
             return at.getSignalQuality()
         except:
-            return -1
+            return - 1
     
     def settings(self):
         try:
@@ -2035,7 +2043,7 @@ class Modem:
         except:
             return s
         
-    def __initOptions(self,options):
+    def __initOptions(self, options):
         if(options.has_key('logLevel')):
             self.__logLevel = options.get('logLevel')
         else:self.__logLevel = 0
@@ -2068,7 +2076,6 @@ class Modem:
     def __init(self, retry=20):
         try:
             if(retry <= 0): retry = 1
-            self.state = 0
             self.model = at.getModel()
             self.imei = at.getIMEI()
             self.firmware = at.getFirmwareVersion()
@@ -2095,9 +2102,9 @@ class Modem:
                 return 0
             self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: GPRS Settings OK.')
             self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: SIM and GPRS OK.')
-            self.modem['state'] = 1
+            return 1
         except:
-            self.modem['state'] = 0
+            return 0
             self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[Modem]:: Error configuring modem. Continuing without it...")
     
     def __setNtp(self):
@@ -2126,7 +2133,7 @@ class Modem:
             
     def __initGPRSConnection(self):
             self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing GPRS connection...')
-            gprs = at.initGPRSConnection(pdpContextId=1, self.__log)
+            gprs = at.initGPRSConnection(pdpContextId=1)
             if(gprs):
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, "[Modem]:: GPRS OK.")
             else:
@@ -2171,11 +2178,11 @@ class At:
                 r = mdm.send(cmd, 5)
             if (r < 0):
                 raise self.timeout('Send "%s" timed out.' % cmd)
-            timer = MOD.secCounter() + timeOut
+            timer = time.time() + timeOut
             response = cmd + mdm.read()
             while (timeOut > 0 and (not expected or response.find(expected) == -1)):
                 response = response + mdm.read()
-                timeOut = timer - MOD.secCounter()
+                timeOut = timer - time.time()
             if(response.find(expected) == -1):
                 if (timeOut > 0):
                     raise self.error('Expected response "%s" not received.' % expected.strip())
@@ -2241,7 +2248,7 @@ class At:
             self.sendCmd(cmd)
             return mode
         except:
-            return -1
+            return - 1
     
     def getTemperature(self):
         try:
@@ -2256,7 +2263,7 @@ class At:
                 resp = self.sendCmd('AT&K=%d' % value)
             return 1
         except:
-            return -1
+            return - 1
         
     def setCmux(self, mode=0, baudrate=9600):
         try:
@@ -2265,7 +2272,7 @@ class At:
                 resp = self.sendCmd('AT#CMUXSCR=%d,%d' % (mode, baudrate))
             return 1
         except:
-            return -1
+            return - 1
         
     def getAntennaStatus(self):
     # 0 - antenna connected.
@@ -2275,7 +2282,7 @@ class At:
         try:
             return int(self.sendCmd('AT#GSMAD=3', 10).split('\r\n')[1].split(':')[1])
         except:
-            return -1
+            return - 1
     
     def getActiveScript(self):
         return self.sendCmd('AT#ESCRIPT?', 1).replace('#ESCRIPT: ', '').replace('"', '')
@@ -2364,7 +2371,7 @@ class At:
                 continue
         return imei
     
-    def initSimDetect(self, simDetectMode='', retry=20):  
+    def initSimDetect(self, simDetectMode=2, retry=20):  
         if simDetectMode < 0 or simDetectMode > 2: return 0
         success = 0
         if(retry <= 0): retry = 1
@@ -2529,7 +2536,16 @@ class At:
         self.sendCmd('AT#SH=%d' % connId, timeout)
     
     def socketRecv(self, connId, maxByte, timeout):
-        return self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout).split('\r\n')[2]
+        resp = self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout).split('\r\n')
+        i = 0
+        expectedResponse = "#SRECV: %d" % connId
+        bytesToRead = 0
+        for r in resp:
+            i = i + 1
+            if(r.find(expectedResponse) == 0):
+                bytesToRead = int(r.split(",")[1])
+                break
+        return (bytesToRead, resp[i])
     
     def socketSend(self, connId, data, bytestosend, timeout, multiPart=0):
     # bytestosend(1-1500)

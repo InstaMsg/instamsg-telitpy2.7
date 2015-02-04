@@ -3,7 +3,7 @@
 #################Network Settings#################
 SIM_DETECTION_MODE = 1  # (0-2)0-"SIM Not Inserted", 1-"SIM Inserted", 2- Automatic sim detection
 SIM_PIN = ''
-GPRS_APN = 'm2m.LL.com'
+GPRS_APN = 'www'
 GPRS_USERID = ''
 GPRS_PASSW = ''
 #################Firewall Settings#################
@@ -16,16 +16,15 @@ FIRE_WALL_ADDRESS = []
 #################NTP settings for ioeye######################
 NTP_SERVER = 'ntp.ioeye.com'  # leave '' for disabling NTP
 NTP_PORT = 123  # default port 123
-
-tries = 3  # Try three times to start then disable python script.
+tries = 1  # Try three times to start then disable python script.
 while(tries > 0):
     try:
         tries = tries - 1
-        import sys
         import MDM
         import SER
         import MOD
-        import config
+        import time
+        import sys
         import instamsg
     except:
         try:
@@ -41,13 +40,17 @@ while(tries > 0):
                 f.close()
                 sys.exit()
 
+
 def start(args):
     instaMsg = None
     try:
         try:
+            stdOut,stdErr= sys.stdout,sys.stderr
+            logger = Logger()
+            sys.stdout = sys.stderr = logger
             options = {'logLevel':instamsg.INSTAMSG_LOG_LEVEL_DEBUG}
-            clientId = "d06f5d10-8091-11e4-bd82-543530e3bc65"
-            authKey = "afdlkjghfdjglkjo-094-09k"
+            clientId = "525420b0-aa9d-11e4-a4c6-404014d5dd81"
+            authKey = "password"
             modemSettings = {
                   'sim_detection_mode':SIM_DETECTION_MODE,
                   'sim_pin':SIM_PIN,
@@ -56,27 +59,48 @@ def start(args):
                   'gprs_pswd':GPRS_PASSW,
                   'firewall_addresses': FIRE_WALL_ADDRESS,
                   'ntp_server': NTP_SERVER,
-                  'ntp_port': NTP_PORT
+                  'ntp_port': NTP_PORT,
+                  'logLevel':instamsg.INSTAMSG_LOG_LEVEL_DEBUG
                   }
             modem = instamsg.Modem(modemSettings, _handleModemDebugMessages)
             instaMsg = instamsg.InstaMsg(clientId, authKey, __onConnect, __onDisConnect, __oneToOneMessageHandler, options)
             while 1:
                 instaMsg.process()
-                instamsg.time.sleep(1)
+                time.sleep(1)
         except:
             print("Unknown Error in start: %s %s" % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))
     finally:
+        sys.stdout = stdOut
+        sys.stderr = stdErr 
         if(instaMsg):
             instaMsg.close()
             instaMsg = None
+
+class Logger:
+    def __init__(self):
+        self.debugFile = open("debug.log", 'wb')
+    
+    def write(self,msg):
+        try:
+            if(msg and msg not in ('\n', '\r\n')):
+                if self.debugFile is None:
+                    self.debugFile = open("debug.log", 'ab')
+                msg= "%s- %s\r\n" %(time.time(),msg)
+                self.debugFile.write(msg)
+                self.debugFile.flush()
+        except:
+            pass
+        
+    def close(self):
+        self.debugFile.close()
     
 def __onConnect(instaMsg):
 #     topic = "62513710-86c0-11e4-9dcf-a41f726775dd"
-    topic = "subTopic1"
+    topic = "pubtopic1"
     qos = 0
     __subscribe(instaMsg, topic, qos)
-#     __publishMessage(instaMsg, "32680660-8098-11e4-94ac-543530e3bc65", "cccccccccccc",2, 0)
-    __sendMessage(instaMsg)
+    __publishMessage(instaMsg, "subtopic2", "cccccccccccc",0, 0)
+#    __sendMessage(instaMsg)
 #     __publishMessage(instaMsg, "32680660-8098-11e4-94ac-543530e3bc65", "bbbbbbbbbbbb",0, 0)
     
 def __onDisConnect():
@@ -122,7 +146,7 @@ def __oneToOneMessageHandler(msg):
         
 def __sendMessage(instaMsg):
     try:
-        clienId = "32680660-8098-11e4-94ac-543530e3bc65"
+        clienId = "2ebb9430-aa9d-11e4-a4c6-404014d5dd81"
         msg = "This is a test send message."
         qos = 1
         dup = 0
@@ -138,7 +162,8 @@ def __sendMessage(instaMsg):
         instaMsg.send(clienId, msg, qos, dup, _replyHandler, 120)    
     except Exception, e:
         print str(e)
-    
+
 if  __name__ == "__main__":
     rc = start(sys.argv)
     sys.exit(rc)
+    
