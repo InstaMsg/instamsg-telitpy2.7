@@ -128,7 +128,11 @@ class InstaMsg:
                 self.__msgHandlers[topic] = msgHandler
                 if(topic == self.__clientId):
                     raise ValueError("Canot subscribe to clientId. Instead set oneToOneMessageHandler.")
-                self.__mqttClient.subscribe(topic, qos, resultHandler, timeout)
+                def _resultHandler(result):
+                    if(result.failed()):
+                        del self.__msgHandlers[topic]
+                    resultHandler(result)
+                self.__mqttClient.subscribe(topic, qos, _resultHandler, timeout)
             except Exception, e:
                 self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = subscribe][%s]:: %s" % (e.__class__.__name__ , str(e)))
                 raise InstaMsgSubError(str(e))
@@ -140,7 +144,11 @@ class InstaMsg:
     def unsubscribe(self, topics, resultHandler, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
         if(self.__mqttClient):
             try:
-                self.__mqttClient.unsubscribe(topics, resultHandler, timeout)
+                def _resultHandler(result):
+                    if(result.succeeded()):
+                        del self.__msgHandlers[topic]
+                    resultHandler(result)
+                self.__mqttClient.unsubscribe(topics, _resultHandler, timeout)
             except Exception, e:
                 self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = unsubscribe][%s]:: %s" % (e.__class__.__name__ , str(e)))
                 raise InstaMsgUnSubError(str(e))
@@ -167,8 +175,8 @@ class InstaMsg:
                 self.__sendMsgReplyHandlers[messageId] = {'time':time.time(), 'timeout': timeout, 'handler':replyHandler, 'timeOutMsg':timeOutMsg}
                 def _resultHandler(result):
                     if(result.failed()):
-                        replyHandler(result)
                         del self.__sendMsgReplyHandlers[messageId]
+                    replyHandler(result)
             else:
                 _resultHandler = None
             self.publish(clienId, msg, qos, dup, _resultHandler)
@@ -221,47 +229,69 @@ class InstaMsg:
             messageId = msgJson['message_id']
         else: 
             raise ValueError("File transfer message json should have a message_id.") 
-        if(msgJson.has_key('method')):
-            method = msgJson['method']
-        else: 
-            raise ValueError("File transfer message json should have a method.") 
-        if(msgJson.has_key('url')):
-            url = msgJson['url']
-        if(msgJson.has_key('filename')):
-            filename = msgJson['filename']
-        if(replyTopic):
-            if(method == "GET" and not filename):
-                filelist = self.__getFileList()
-                msg = '{"response_id": "%s", "status": 1, "files": %s}' % (messageId, filelist)
-                self.publish(replyTopic, msg, qos, dup)
-            elif (method == "GET" and filename):
-                httpResponse = self.__httpClient.uploadFile(self.__fileUploadUrl, filename, headers={"Authorization":self.__authKey})
-                if(httpResponse and httpResponse.status == 200):
-                    msg = '{"response_id": "%s", "status": 1, "url":"%s"}' % (messageId, httpResponse.body)
-                else:
-                    msg = '{"response_id": "%s", "status": 0}' % (messageId)
-                self.publish(replyTopic, msg, qos, dup)
-            elif ((method == "POST" or method == "PUT") and filename and url):
-                httpResponse = self.__httpClient.downloadFile(url, filename)
-                if(httpResponse and httpResponse.status == 200):
-                    msg = '{"response_id": "%s", "status": 1}' % (messageId)
-                else:
-                    msg = '{"response_id": "%s", "status": 0}' % (messageId)
-                self.publish(replyTopic, msg, qos, dup)
-            elif ((method == "DELETE") and filename):
-                try:
-                    msg = '{"response_id": "%s", "status": 1}' % (messageId)
-                    self.__deleteFile(filename)
+        try:
+            if(msgJson.has_key('method')):
+                method = msgJson['method']
+            else: 
+                raise ValueError("File transfer message json should have a method.") 
+            if(msgJson.has_key('url')):
+                url = msgJson['url']
+            if(msgJson.has_key('filename')):
+                filename = msgJson['filename']
+            if(replyTopic):
+                if(method == "GET" and not filename):
+                    filelist = self.__getFileList()
+                    msg = '{"response_id": "%s", "status": 1, "files": %s}' % (messageId, filelist)
                     self.publish(replyTopic, msg, qos, dup)
-                except Exception, e:
-                    msg = '{"response_id": "%s", "status": 0, "error_msg":"%s"}' % (messageId, str(e))
+                elif (method == "GET" and filename):
+                    httpResponse = self.__httpClient.uploadFile(self.__fileUploadUrl, filename, headers={"Authorization":self.__authKey, "ClientId":self.__clientId})
+                    if(httpResponse and httpResponse.status == 200):
+                        msg = '{"response_id": "%s", "status": 1, "url":"%s"}' % (messageId, httpResponse.body)
+                    else:
+                        msg = '{"response_id": "%s", "status": 0}' % (messageId)
                     self.publish(replyTopic, msg, qos, dup)
-                    
+                elif ((method == "POST" or method == "PUT") and filename and url):
+                    httpResponse = self.__httpClient.downloadFile(url, filename)
+                    if(httpResponse and httpResponse.status == 200):
+                        msg = '{"response_id": "%s", "status": 1}' % (messageId)
+                    else:
+                        msg = '{"response_id": "%s", "status": 0}' % (messageId)
+                    self.publish(replyTopic, msg, qos, dup)
+                elif ((method == "DELETE") and filename):
+                    try:
+                        msg = '{"response_id": "%s", "status": 1}' % (messageId)
+                        self.__deleteFile(filename)
+                        self.publish(replyTopic, msg, qos, dup)
+                    except Exception, e:
+                        msg = '{"response_id": "%s", "status": 0, "error_msg":"%s"}' % (messageId, str(e))
+                        self.publish(replyTopic, msg, qos, dup)
+        except Excetpion, e:
+            if(replyTopic and messageId and qos and dup):
+                msg = '{"response_id": "%s", "status": 0, "error_msg":"%s"}' % (messageId, "File operation failed or timed out. Try again.")
+                self.publish(replyTopic, msg, qos, dup)   
+            self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_DEBUG, "[InstaMsg, method = __handleFileTransferMessage][%s]:: %s" % (e.__class__.__name__ , str(e)))        
             
     def __getFileList(self):
-        at.getActiveScript()
-        fileList = at.getfilelist()
-        fileList['active_script'] = at.getActiveScript()
+        fileList, retry = {}, 3
+        while (retry > 0):
+            retry = retry - 1
+            try:
+                fileList = at.getfilelist()
+                activeScript = at.getActiveScript()
+                if(fileList): 
+                    if(activeScript):
+                        fileList['active_script'] = activeScript
+                    break
+            except Exception, e :
+                if(retry == 0):
+                    if(e.__class__.__name__ == 'ATTimeoutError'):
+                        raise at.timeout(str(e))
+                    elif(e.__class__.__name__ == 'ATError'):
+                        raise at.error(str(e))
+                    else:
+                        raise Exception(str(e))
+                time.sleep(1)
+                continue
         return str(fileList).replace("'", '"')   
     
     def __deleteFile(self, filename):
@@ -1596,7 +1626,8 @@ class HTTPClient:
                     raise HTTPResponseError(str(e))
                 raise HTTPClientError("HTTPClient:: %s" % str(e))
         finally:
-            self.__closeFile(f)  
+            if f:
+                self.__closeFile(f)  
     
     def downloadFile(self, url, filename, params={}, headers={}, timeout=10):  
         if(not isinstance(filename, str)): raise ValueError('HTTPClient:: download filename should be of type str.')
@@ -1617,7 +1648,8 @@ class HTTPClient:
                     raise HTTPResponseError(str(e))
                 raise HTTPClientError("HTTPClient:: %s" % str(e))
         finally:
-            self.__closeFile(f)
+            if f:
+                self.__closeFile(f)
         return response
             
     def __closeFile(self, f):   
@@ -1658,7 +1690,7 @@ class HTTPClient:
                 if(headers.has_key('Content-Length') and isinstance(body, file)):
                     sizeHint = len(request) + headers.get('Content-Length')
                 self._sock = Socket(timeout, 0)
-                self._sock.connect(self.__addr, http=1)
+                self._sock.connect(self.__addr)
                 expect = None
                 if(headers.has_key('Expect')):
                     expect = headers['Expect']
@@ -2177,9 +2209,9 @@ class At:
                 if (timeOut > 0):
                     raise self.error('Expected response "%s" not received.' % expected.strip())
                 else:
-                    raise self.timeout('Receive timed out.')
+                    raise self.timeout('MDM%d receive timed out for .' % (mdm, cmd))
             if(response.find('ERROR') > 0):
-                raise self.error('ERROR response received for "%s".' % cmd) 
+                raise self.error('MDM%d ERROR response received for "%s".' % (mdm, cmd)) 
             else:
                 return response
         except self.error, e:
