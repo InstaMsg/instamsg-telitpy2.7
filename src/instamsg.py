@@ -130,7 +130,8 @@ class InstaMsg:
                     raise ValueError("Canot subscribe to clientId. Instead set oneToOneMessageHandler.")
                 def _resultHandler(result):
                     if(result.failed()):
-                        del self.__msgHandlers[topic]
+                        if(self.__msgHandlers.has_key(topic)):
+                            del self.__msgHandlers[topic]
                     resultHandler(result)
                 self.__mqttClient.subscribe(topic, qos, _resultHandler, timeout)
             except Exception, e:
@@ -146,7 +147,9 @@ class InstaMsg:
             try:
                 def _resultHandler(result):
                     if(result.succeeded()):
-                        del self.__msgHandlers[topic]
+                        for topic in topic:
+                            if(self.__msgHandlers.has_key(topic)):
+                                del self.__msgHandlers[topic]
                     resultHandler(result)
                 self.__mqttClient.unsubscribe(topics, _resultHandler, timeout)
             except Exception, e:
@@ -175,7 +178,8 @@ class InstaMsg:
                 self.__sendMsgReplyHandlers[messageId] = {'time':time.time(), 'timeout': timeout, 'handler':replyHandler, 'timeOutMsg':timeOutMsg}
                 def _resultHandler(result):
                     if(result.failed()):
-                        del self.__sendMsgReplyHandlers[messageId]
+                        if(self.__sendMsgReplyHandlers.has_key(messageId)):
+                            del self.__sendMsgReplyHandlers[messageId]
                     replyHandler(result)
             else:
                 _resultHandler = None
@@ -265,7 +269,7 @@ class InstaMsg:
                     except Exception, e:
                         msg = '{"response_id": "%s", "status": 0, "error_msg":"%s"}' % (messageId, str(e))
                         self.publish(replyTopic, msg, qos, dup)
-        except Excetpion, e:
+        except Exception, e:
             if(replyTopic and messageId and qos and dup):
                 msg = '{"response_id": "%s", "status": 0, "error_msg":"%s"}' % (messageId, "File operation failed or timed out. Try again.")
                 self.publish(replyTopic, msg, qos, dup)   
@@ -1938,13 +1942,13 @@ class Socket:
 class TimeHelper:
 
     def __init__(self):
-        self.error = TimeError;
+        self.error = TimeHelperError;
              
     def asctime(self):
         try:
             return at.getRtcTime()
         except Exception, e:
-            raise self.error('Time:: Unable to get time. %s' % repr(e))    
+            raise self.error('Unable to get time. %s' % repr(e))    
     
     def getTimeAndOffset(self):
         try:
@@ -1954,7 +1958,7 @@ class TimeHelper:
             offset = str(self.__getOffset(t))
             return [timestr, offset]
         except Exception, e:
-            raise self.error('Time:: Unable to parse time.')
+            raise self.error('Unable to parse time.')
         
     def localtime(self, time=None):
         if(time is None):
@@ -2638,7 +2642,7 @@ class ATTimeoutError(IOError):
     def __str__(self):
         return repr(self.value)
     
-class TimeError(Exception):
+class TimeHelperError(Exception):
     def __init__(self, value=''):
         self.value = value
     def __str__(self):
