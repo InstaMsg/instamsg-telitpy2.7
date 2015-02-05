@@ -688,10 +688,7 @@ class MqttClient:
             
     def __receive(self):
         try:
-            remainingBytes, data = self.__sock.recv(self.MAX_BYTES_MDM_READ)
-            while (remainingBytes > len(data)):
-                r, moreData = self.__sock.recv(self.MAX_BYTES_MDM_READ)
-                data = data + moreData
+            data = self.__sock.recv(self.MAX_BYTES_MDM_READ)
             if data: 
                 mqttMsg = self.__mqttDecoder.decode(data)
             else:
@@ -1878,7 +1875,7 @@ class Socket:
                 if(bufsize > 1500 or bufsize < 0):bufsize = 1500
                 return at.socketRecv(self._sockno, bufsize, self._timeout + 3)
             else:
-                return (0,'')
+                return ''
         except at.timeout:
             raise SocketTimeoutError('Timed out.')
         except Exception, e:
@@ -2537,15 +2534,12 @@ class At:
     
     def socketRecv(self, connId, maxByte, timeout):
         resp = self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout).split('\r\n')
-        i = 0
-        expectedResponse = "#SRECV: %d" % connId
-        bytesToRead = 0
+        i, expectedResponse = 0, "#SRECV: %d" % connId
         for r in resp:
             i = i + 1
             if(r.find(expectedResponse) == 0):
-                bytesToRead = int(r.split(",")[1])
                 break
-        return (bytesToRead, resp[i])
+        return resp[i]
     
     def socketSend(self, connId, data, bytestosend, timeout, multiPart=0):
     # bytestosend(1-1500)
