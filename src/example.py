@@ -32,7 +32,7 @@ while(tries > 0):
                 # Create __error log for trouble shooting.
                 error = ('ioEYE:: Fatal __error.%s %s\r\n' % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))       
                 f = open('__error.log', 'wb')
-                error = error + 'ioEYE:: Disabling python script...\r\n'
+                error = error + 'Disabling python script...\r\n'
                 f.write(error)
                 MDM.send('AT#ESCRIPT=""' + '\r', 5)
         finally:

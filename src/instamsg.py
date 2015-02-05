@@ -259,17 +259,10 @@ class InstaMsg:
                     
             
     def __getFileList(self):
-        return '{"test.py":100}'
-#         path = os.getcwd()
-#         fileList = ""
-#         for root, dirs, files in os.walk(path):
-#             for name in files:
-#                 filename = os.path.join(root, name)
-#                 size = os.stat(filename).st_size
-#                 if(fileList):
-#                     fileList = fileList + ","
-#                 fileList = fileList + '"%s":%d' % (name, size)
-#         return '{%s}' % fileList      
+        at.getActiveScript()
+        fileList = at.getfilelist()
+        fileList['active_script'] = at.getActiveScript()
+        return str(fileList).replace("'", '"')   
     
     def __deleteFile(self, filename):
         unlink(filename)
@@ -2282,10 +2275,28 @@ class At:
             return - 1
     
     def getActiveScript(self):
-        return self.sendCmd('AT#ESCRIPT?', 1).replace('#ESCRIPT: ', '').replace('"', '')
+        resp = self.sendCmd('AT#ESCRIPT?', 1).split('\r\n')
+        expectedResponse = '#ESCRIPT: '
+        activeScript = ''
+        for r in resp:
+            if(r.find(expectedResponse) == 0):    
+                activeScript = r.replace(expectedResponse, '').replace('"', '')
+                break
+        return activeScript
         
     def getfilelist(self):
-        return self.sendCmd('AT#LSCRIPT', 1).replace('#LSCRIPT: ', '').replace('"', '').split('\r\n')
+        resp = self.sendCmd('AT#LSCRIPT', 1).split('\r\n')
+        fileList, expectedResponse = {}, '#LSCRIPT: '
+        for r in resp:
+            if(r.find(expectedResponse) == 0):
+                fileinfo = r.replace(expectedResponse, '')
+                if(fileinfo.find('free bytes') == 0):
+                    fileinfo = fileinfo.replace('free bytes', 'free_bytes').split(':')
+                else:
+                    fileinfo = fileinfo.replace('"', '').split(',')
+                if(len(fileinfo) == 2):
+                    fileList[fileinfo[0]] = int(fileinfo[1])
+        return fileList
     
     # Time AT commands
     
