@@ -65,7 +65,7 @@ def start(args):
             modem = instamsg.Modem(modemSettings, _handleModemDebugMessages)
             instaMsg = instamsg.InstaMsg(clientId, authKey, __onConnect, __onDisConnect, __oneToOneMessageHandler, options)
             while 1:
-                instaMsg.process()
+#                instaMsg.process()
                 time.sleep(1)
         except:
             print("Unknown Error in start: %s %s" % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))

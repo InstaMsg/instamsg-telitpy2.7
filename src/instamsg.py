@@ -4,6 +4,7 @@ import MDM
 import MDM2
 import sys 
 import time
+import thread
 import instamsg
 
 ####InstaMsg ###############################################################################
@@ -69,7 +70,8 @@ class InstaMsg:
             self.__mqttClient.connect()
         else:
             self.__mqttClient = None
-        self.__httpClient = HTTPClient(self.INSTAMSG_HTTP_HOST, self.__httpPort)
+        thread.start_new_thread(self.__process,())
+        self.__lock = thread.allocate_lock()
         
     def __initOptions(self, options):
         if(self.__options.has_key('enableSocket')):
@@ -94,16 +96,18 @@ class InstaMsg:
             self.__port = self.INSTAMSG_PORT
             self.__httpPort = self.INSTAMSG_HTTP_PORT
         
-    def process(self):
-        try:
-            if(self.__mqttClient):
-                self.__processHandlersTimeout()
-                self.__mqttClient.process()
-        except Exception, e:
-            self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
+    def __process(self):
+        while 1:
+            try:
+                if(self.__mqttClient):
+                    self.__mqttClient.process()
+                    self.__processHandlersTimeout()
+            except Exception, e:
+                self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
     
     def close(self):
         try:
+            self.__lock.acquire()
             self.__mqttClient.disconnect()
             self.__mqttClient = None
             self.__sendMsgReplyHandlers = None
@@ -112,30 +116,42 @@ class InstaMsg:
             return 1
         except:
             return - 1
+        finally:
+            thread.exit()
+            self.__lock.release()     
     
     def publish(self, topic, msg, qos=INSTAMSG_QOS0, dup=0, resultHandler=None, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
-        if(topic):
+        if(self.__mqttClient and topic):
             try:
+                self.__lock.acquire()
                 self.__mqttClient.publish(topic, msg, qos, dup, resultHandler, timeout)
             except Exception, e:
                 raise InstaMsgPubError(str(e))
+            finally:
+                if(self.__mqttClient):
+                    self.__lock.release()
         else: raise ValueError("Topic cannot be null or empty string.")
     
     def subscribe(self, topic, qos, msgHandler, resultHandler, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
         if(self.__mqttClient):
             try:
+                self.__lock.acquire()
                 if(not callable(msgHandler)): raise ValueError('msgHandler should be a callable object.')
                 self.__msgHandlers[topic] = msgHandler
                 if(topic == self.__clientId):
                     raise ValueError("Canot subscribe to clientId. Instead set oneToOneMessageHandler.")
                 def _resultHandler(result):
                     if(result.failed()):
-                        del self.__msgHandlers[topic]
+                        if(self.__msgHandlers.has_key(topic)):
+                            del self.__msgHandlers[topic]
                     resultHandler(result)
                 self.__mqttClient.subscribe(topic, qos, _resultHandler, timeout)
             except Exception, e:
                 self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = subscribe][%s]:: %s" % (e.__class__.__name__ , str(e)))
                 raise InstaMsgSubError(str(e))
+            finally:
+                if(self.__mqttClient):
+                    self.__lock.release()              
         else:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = subscribe][%s]:: %s" % ("InstaMsgSubError" + str(e)))
             raise InstaMsgSubError("Cannot subscribe as TCP is not enabled. Two way messaging only possible on TCP and not HTTP")
@@ -144,14 +160,20 @@ class InstaMsg:
     def unsubscribe(self, topics, resultHandler, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
         if(self.__mqttClient):
             try:
+                self.__lock.acquire()
                 def _resultHandler(result):
                     if(result.succeeded()):
-                        del self.__msgHandlers[topic]
+                        for topic in topic:
+                            if(self.__msgHandlers.has_key(topic)):
+                                del self.__msgHandlers[topic]
                     resultHandler(result)
                 self.__mqttClient.unsubscribe(topics, _resultHandler, timeout)
             except Exception, e:
                 self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = unsubscribe][%s]:: %s" % (e.__class__.__name__ , str(e)))
                 raise InstaMsgUnSubError(str(e))
+            finally:
+                if(self.__mqttClient):
+                    self.__lock.release()
         else:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = unsubscribe][%s]:: %s" % ("InstaMsgUnSubError" , str(e)))
             raise InstaMsgUnSubError("Cannot unsubscribe as TCP is not enabled. Two way messaging only possible on TCP and not HTTP")
@@ -175,7 +197,8 @@ class InstaMsg:
                 self.__sendMsgReplyHandlers[messageId] = {'time':time.time(), 'timeout': timeout, 'handler':replyHandler, 'timeOutMsg':timeOutMsg}
                 def _resultHandler(result):
                     if(result.failed()):
-                        del self.__sendMsgReplyHandlers[messageId]
+                        if(self.__sendMsgReplyHandlers.has_key(messageId)):
+                            del self.__sendMsgReplyHandlers[messageId]
                     replyHandler(result)
             else:
                 _resultHandler = None
@@ -208,7 +231,7 @@ class InstaMsg:
     
     def __handleMessage(self, mqttMsg):
         if(mqttMsg.topic == self.__clientId):
-            self.__handleOneToOneMessage(mqttMsg)
+            self.__handlePointToPointMessage(mqttMsg)
         elif(mqttMsg.topic == self.__filesTopic):
             self.__handleFileTransferMessage(mqttMsg)
         else:
@@ -244,14 +267,15 @@ class InstaMsg:
                     msg = '{"response_id": "%s", "status": 1, "files": %s}' % (messageId, filelist)
                     self.publish(replyTopic, msg, qos, dup)
                 elif (method == "GET" and filename):
-                    httpResponse = self.__httpClient.uploadFile(self.__fileUploadUrl, filename, headers={"Authorization":self.__authKey, "ClientId":self.__clientId})
+                    httpClient = HTTPClient(self.INSTAMSG_HTTP_HOST, self.__httpPort)
+                    httpResponse = httpClient.uploadFile(self.__fileUploadUrl, filename, headers={"Authorization":self.__authKey, "ClientId":self.__clientId})
                     if(httpResponse and httpResponse.status == 200):
                         msg = '{"response_id": "%s", "status": 1, "url":"%s"}' % (messageId, httpResponse.body)
                     else:
                         msg = '{"response_id": "%s", "status": 0}' % (messageId)
                     self.publish(replyTopic, msg, qos, dup)
                 elif ((method == "POST" or method == "PUT") and filename and url):
-                    httpResponse = self.__httpClient.downloadFile(url, filename)
+                    httpResponse = httpClient.downloadFile(url, filename)
                     if(httpResponse and httpResponse.status == 200):
                         msg = '{"response_id": "%s", "status": 1}' % (messageId)
                     else:
@@ -265,7 +289,7 @@ class InstaMsg:
                     except Exception, e:
                         msg = '{"response_id": "%s", "status": 0, "error_msg":"%s"}' % (messageId, str(e))
                         self.publish(replyTopic, msg, qos, dup)
-        except Excetpion, e:
+        except Exception, e:
             if(replyTopic and messageId and qos and dup):
                 msg = '{"response_id": "%s", "status": 0, "error_msg":"%s"}' % (messageId, "File operation failed or timed out. Try again.")
                 self.publish(replyTopic, msg, qos, dup)   
@@ -297,7 +321,7 @@ class InstaMsg:
     def __deleteFile(self, filename):
         unlink(filename)
         
-    def __handleOneToOneMessage(self, mqttMsg):
+    def __handlePointToPointMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
         messageId, responseId, replyTopic, status = None, None, None, 1
         if(msgJson.has_key('reply_to')):
@@ -836,7 +860,7 @@ class MqttClient:
             if(self.__sock is not None):
                 self.__closeSocket()
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Opening socket to %s:%s' % (self.host, str(self.port)))
-            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT)
+            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at)
             self.__sock.connect((self.host, self.port))
             self.__sockInit = 1
             self.__waitingReconnect = 0
@@ -1689,7 +1713,7 @@ class HTTPClient:
                 sizeHint = None
                 if(headers.has_key('Content-Length') and isinstance(body, file)):
                     sizeHint = len(request) + headers.get('Content-Length')
-                self._sock = Socket(timeout, 0)
+                self._sock = Socket(timeout, at2, 0)
                 self._sock.connect(self.__addr)
                 expect = None
                 if(headers.has_key('Expect')):
@@ -1806,16 +1830,17 @@ class Socket:
     socketStates[4] = "Socket listening."
     socketStates[5] = "Socket with an incoming connection. Waiting for the accept or shutdown command."
     
-    def __init__(self, timeout, keepAlive=default_keep_alive):
+    def __init__(self, timeout, at, keepAlive=default_keep_alive):
         if(keepAlive < 0 or keepAlive > 240): raise SocketError("Keep alive should be between 0-240")
         self._timeout = timeout or 10  # sec
         self._keepAlive = keepAlive 
         self._listenAutoRsp = 0
         self._sockno = None
         self.connected = 0
+        self.__at = at
             
     def __get_socketno(self):
-        sockStates = at.socketStatus()
+        sockStates = self.__at.socketStatus()
         for sockState in sockStates:
             ss = sockState.split(',')
             if ss[1] == '0':
@@ -1826,21 +1851,21 @@ class Socket:
         try:
             self._sockno = self.__get_socketno()
             if(self._sockno):
-                at.configureSocket(connId=self._sockno, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp)
+                self.__at.configureSocket(connId=self._sockno, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp)
             else:
                 raise SocketMaxCountError('All sockets in use. Total number of socket cannot exceed %d.' % self.maxconn)
         except:
             raise SocketConfigError('Unable to configure socket')
         
     def __socketStatus(self):
-        return int(at.socketStatus(self._sockno).split(',')[1])
+        return int(self.__at.socketStatus(self._sockno).split(',')[1])
     
     def connect(self, addr):
         try:
-            at.initGPRSConnection()
+            self.__at.initGPRSConnection()
             self.addr = addr
             self.__configureSocket()
-            at.connectSocket(self._sockno, addr, timeout=self._timeout + 3)
+            self.__at.connectSocket(self._sockno, addr, timeout=self._timeout + 3)
             self.connected = 1
         except(SocketMaxCountError, SocketConfigError), msg:
             raise SocketError(str(msg))
@@ -1850,11 +1875,11 @@ class Socket:
     def listen(self, addr):
 # Telit module only allows one connection at a time on a listening socket.
         try:
-            at.initGPRSConnection()
+            self.__at.initGPRSConnection()
             self.addr = addr
             self._listenAutoRsp = 1
             self.__configureSocket()
-            at.socketListen(self._sockno, 1, addr(1), timeout=self._timeout + 3)
+            self.__at.socketListen(self._sockno, 1, addr(1), timeout=self._timeout + 3)
             self.connected = 1
             self.accepting = 1
         except(SocketMaxCountError, SocketConfigError), msg:
@@ -1862,22 +1887,9 @@ class Socket:
         except:
             raise SocketError('Unable to bind to %s .' % str(addr))
         
-    def getHTTP(self, addr, data):
-        try:
-            at.initGPRSConnection()
-            self.__configureSocket()
-            data = "GET %s HTTP/1.0\r\nHost: %s\r\nUser-agent: ioEYE Connect\r\nConnection: close\r\n\r\n" % (data, addr[0])
-            at.socketGetHTTP(self._sockno, addr, data, self._timeout)
-        except(SocketMaxCountError, SocketConfigError), msg:
-            raise SocketError(str(msg))
-        except at.timeout:
-            raise SocketTimeoutError('HTTP Get Timed out.')
-        except:
-            raise SocketError('Error in HTTP Get.')
-    
     def accept(self):
         try:
-            at.socketAccept(self._sockno)
+            self.__at.socketAccept(self._sockno)
         except:
             raise SocketError('Error in connection accept.')  
                      
@@ -1885,9 +1897,9 @@ class Socket:
         try:
             if(self.__socketStatus() == 0):return
             if(self.accepting):
-                at.socketListen(self._sockno, 0, self.addr[1], self._timeout) 
+                self.__at.socketListen(self._sockno, 0, self.addr[1], self._timeout) 
                 self.accepting = 0   
-            at.closeSocket(self._sockno)
+            self.__at.closeSocket(self._sockno)
             self.connected = 0
         except:
             raise SocketError('Unable to close socket %d' % self._sockno)
@@ -1898,10 +1910,10 @@ class Socket:
             if(not ss):raise SocketError(self.socketStates[ss])
             if(ss == 3):
                 if(bufsize > 1500 or bufsize < 0):bufsize = 1500
-                return at.socketRecv(self._sockno, bufsize, self._timeout + 3)
+                return self.__at.socketRecv(self._sockno, bufsize, self._timeout + 3)
             else:
                 return ''
-        except at.timeout:
+        except self.__at.timeout:
             raise SocketTimeoutError('Timed out.')
         except Exception, e:
             raise SocketError('Error in recv data - %s' % str(e))
@@ -1911,8 +1923,8 @@ class Socket:
             ss = self.__socketStatus()
             if(not ss):raise SocketError(self.socketStates[ss])
             data = data[:1500]
-            return at.socketSend(self._sockno, data, len(data), self._timeout + 3, 0)
-        except at.timeout:
+            return self.__at.socketSend(self._sockno, data, len(data), self._timeout + 3, 0)
+        except self.__at.timeout:
             raise SocketTimeoutError('Timed out.')
         except:
             raise SocketError('Error in send data.')
@@ -1924,10 +1936,10 @@ class Socket:
             i = 0
             while(data):
                 partData = data[:1500]
-                sendDataSize = at.socketSend(self._sockno, partData, len(partData), self._timeout + 3, i)
+                sendDataSize = self.__at.socketSend(self._sockno, partData, len(partData), self._timeout + 3, i)
                 data = data[sendDataSize:]
                 i = i + 1
-        except at.timeout:
+        except self.__at.timeout:
             raise SocketTimeoutError('Timed out.')
         except:
             raise SocketError('Error in sendall data.')  
@@ -1938,13 +1950,13 @@ class Socket:
 class TimeHelper:
 
     def __init__(self):
-        self.error = TimeError;
+        self.error = TimeHelperError;
              
     def asctime(self):
         try:
             return at.getRtcTime()
         except Exception, e:
-            raise self.error('Time:: Unable to get time. %s' % repr(e))    
+            raise self.error('Unable to get time. %s' % repr(e))    
     
     def getTimeAndOffset(self):
         try:
@@ -1954,7 +1966,7 @@ class TimeHelper:
             offset = str(self.__getOffset(t))
             return [timestr, offset]
         except Exception, e:
-            raise self.error('Time:: Unable to parse time.')
+            raise self.error('Unable to parse time.')
         
     def localtime(self, time=None):
         if(time is None):
@@ -2183,36 +2195,42 @@ class Modem:
 
 #####AT Functions#########################################################################
 class At:
-    def __init__(self):
+    def __init__(self,  mdm=1):
         self.timeout = ATTimeoutError
         self.error = ATError
+        if(mdm == 2):
+            self.__mdm = MDM2
+        else:
+            self.__mdm = MDM
+        self.__lock = thread.allocate_lock()
+        self.sendCmd('ATE1')
     
-    def sendCmd(self, cmd, timeOut=2, expected='OK\r\n', addCR=1, mdm=1):
+    def sendCmd(self, cmd, timeOut=2, expected='OK\r\n', addCR=1):
         try:
-            if(mdm == 2):
-                mdm = MDM2
-            else:
-                mdm = MDM
+            self.__lock.acquire()
             if (timeOut <= 0): timeOut = 2
             if (addCR == 1):
-                r = mdm.send(cmd + '\r', 5)
+                r = self.__mdm.send(cmd + '\r', 5)
             else:
-                r = mdm.send(cmd, 5)
+                r = self.__mdm.send(cmd, 5)
             if (r < 0):
                 raise self.timeout('Send "%s" timed out.' % cmd)
             timer = time.time() + timeOut
-            response = cmd + mdm.read()
+            response = cmd + self.__mdm.read()
             while (timeOut > 0 and (not expected or response.find(expected) == -1)):
-                response = response + mdm.read()
+                response = response + self.__mdm.read()
                 timeOut = timer - time.time()
             if(response.find(expected) == -1):
                 if (timeOut > 0):
                     raise self.error('Expected response "%s" not received.' % expected.strip())
                 else:
-                    raise self.timeout('MDM%d receive timed out for .' % (mdm, cmd))
+                    raise self.timeout('%s receive timed out for .' % (self.__mdm.__class__.__name__, cmd))
             if(response.find('ERROR') > 0):
-                raise self.error('MDM%d ERROR response received for "%s".' % (mdm, cmd)) 
+                raise self.error('%s ERROR response received for "%s".' % (self.__mdm.__class__.__name__, cmd)) 
             else:
+                if(response.find("SRING:")>=0):
+                   r = response.split('\r\n')
+                   response = '%s\r\n' %r[0] + '\r\n'.join(r[3:])
                 return response
         except self.error, e:
             raise self.error(str(e))
@@ -2220,6 +2238,8 @@ class At:
             raise self.timeout(str(e))
         except Exception, e:
             raise self.error("UnexpectedError, command %s failed." % cmd)
+        finally:
+            self.__lock.release() 
     
     # Module AT commands
 
@@ -2591,18 +2611,11 @@ class At:
         self.sendCmd(data, timeout, expected='OK\r\n', addCR=0)
         return bytestosend
     
-    def socketGetHTTP(self, connId, addr, data, timeout=30):
-        try:
-            resp = self.sendCmd('AT#SD=%d,0,%d,"%s",0,0,0' % (connId, addr[1], addr[0]), timeout, expected='CONNECT\r\n', mdm=2)
-            resp = self.sendCmd(data, timeout, expected='HTTP/1.1 200 OK', addCR=0, mdm=2)
-        finally:
-            resp = self.sendCmd('+++', timeout, expected='NO CARRIER\r\n', addCR=0, mdm=2)
-        
     def socketStatus(self, connId=None):
         if(connId):
-            return self.sendCmd('AT#SS', mdm=2).split('\r\n')[connId].replace('#SS: ', '')
+            return self.sendCmd('AT#SS').split('\r\n')[connId].replace('#SS: ', '')
         else:
-            return self.sendCmd('AT#SS', mdm=2).replace('#SS: ', '').split('\r\n')[1:6]
+            return self.sendCmd('AT#SS').replace('#SS: ', '').split('\r\n')[1:6]
     
     def suspendSocket(self):   
         self.sendCmd('+++')
@@ -2638,7 +2651,7 @@ class ATTimeoutError(IOError):
     def __str__(self):
         return repr(self.value)
     
-class TimeError(Exception):
+class TimeHelperError(Exception):
     def __init__(self, value=''):
         self.value = value
     def __str__(self):
@@ -2741,3 +2754,4 @@ class InstaMsgSendError(InstaMsgError):
         return repr(self.value)
     
 at = instamsg.At()
+at2 = instamsg.At(mdm=2)
