@@ -36,6 +36,7 @@ You can use python 2.7.x (intalled on your computer) to compile the python scrip
 
 python -v -S C:\Python27\Lib\compileall.py -l -f C:\instamsg-telitpy2.7\src
 
+If you do not want to build and use the library directly you can use the instamsg.pyc in the build folder.
 
 ## How do I get set up? ##
 
