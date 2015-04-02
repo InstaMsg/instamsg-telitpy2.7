@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+#######Compile Files #############
+#python -v -S C:\Python27\Lib\compileall.py -l -f E:\SenseGrow\instamsg-clients\instamsg-telitpy2.7\src
 #################Network Settings#################
 SIM_DETECTION_MODE = 1  # (0-2)0-"SIM Not Inserted", 1-"SIM Inserted", 2- Automatic sim detection
 SIM_PIN = ''
@@ -40,7 +42,6 @@ while(tries > 0):
                 f.close()
                 sys.exit()
 
-
 def start(args):
     instaMsg = None
     try:
@@ -49,8 +50,11 @@ def start(args):
             logger = Logger()
             sys.stdout = sys.stderr = logger
             options = {'logLevel':instamsg.INSTAMSG_LOG_LEVEL_DEBUG}
-            clientId = "525420b0-aa9d-11e4-a4c6-404014d5dd81"
-            authKey = "password"
+            # if ssl enable
+#            options = {'logLevel':instamsg.INSTAMSG_LOG_LEVEL_DEBUG,'enableSsl':1}
+            
+            clientId = "99fb7e20-c7c8-11e4-8ea8-bc764e102b63"
+            authKey = "AVE5DgIGycSjoiER8k33sIQdPYbJqEe3u"
             modemSettings = {
                   'sim_detection_mode':SIM_DETECTION_MODE,
                   'sim_pin':SIM_PIN,
@@ -65,7 +69,7 @@ def start(args):
             modem = instamsg.Modem(modemSettings, _handleModemDebugMessages)
             instaMsg = instamsg.InstaMsg(clientId, authKey, __onConnect, __onDisConnect, __oneToOneMessageHandler, options)
             while 1:
-#                instaMsg.process()
+                #instaMsg.process()
                 time.sleep(1)
         except:
             print("Unknown Error in start: %s %s" % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))
@@ -96,10 +100,13 @@ class Logger:
     
 def __onConnect(instaMsg):
 #     topic = "62513710-86c0-11e4-9dcf-a41f726775dd"
-    topic = "pubtopic1"
+    topic = "abc"
     qos = 0
     __subscribe(instaMsg, topic, qos)
-    __publishMessage(instaMsg, "subtopic2", "cccccccccccc",0, 0)
+    __publishMessage(instaMsg, "abc", "XXXXX ssl testing",1, 0)
+    time.sleep(60)
+    __publishMessage(instaMsg, "abc", "Hello Java",1, 0)
+#    __subscribe(instaMsg, "99533d950-c88b-11e4-bf22-bc764e102b63", qos)
 #    __sendMessage(instaMsg)
 #     __publishMessage(instaMsg, "32680660-8098-11e4-94ac-543530e3bc65", "bbbbbbbbbbbb",0, 0)
     
@@ -146,7 +153,7 @@ def __oneToOneMessageHandler(msg):
         
 def __sendMessage(instaMsg):
     try:
-        clienId = "2ebb9430-aa9d-11e4-a4c6-404014d5dd81"
+        clienId = "99533d950-c88b-11e4-bf22-bc764e102b63"
         msg = "This is a test send message."
         qos = 1
         dup = 0
