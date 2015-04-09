@@ -27,7 +27,7 @@ INSTAMSG_QOS2 = 2
 
 class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
-    INSTAMSG_KEEP_ALIVE_TIMER = 300
+    INSTAMSG_KEEP_ALIVE_TIMER = 120
     INSTAMSG_RECONNECT_TIMER = 90
     INSTAMSG_HOST = "device.instamsg.io"
     INSTAMSG_PORT = 1883
@@ -56,6 +56,7 @@ class InstaMsg:
         self.__sendMsgReplyHandlers = {}  # {handlerId:{time:122334,handler:replyHandler, timeout:10, timeOutMsg:"Timed out"}}
         self.__sslEnabled = 0
         self.__initOptions(options)
+        self.__lock = thread.allocate_lock()
         if(self.__enableTcp):
             clientIdAndUsername = self.__getClientIdAndUsername(clientId)
             mqttoptions = self.__mqttClientOptions(clientIdAndUsername[1], authKey, self.__keepAliveTimer, self.__sslEnabled)
@@ -69,7 +70,6 @@ class InstaMsg:
         else:
             self.__mqttClient = None
         thread.start_new_thread(self.__process, ())
-        self.__lock = thread.allocate_lock()
         
     def __initOptions(self, options):
         if(self.__options.has_key('enableSocket')):
@@ -94,6 +94,9 @@ class InstaMsg:
         else: 
             self.__port = self.INSTAMSG_PORT
             self.__httpPort = self.INSTAMSG_HTTP_PORT
+            
+    def process(self):
+        self.__process()
         
     def __process(self):
         while 1:
@@ -103,10 +106,9 @@ class InstaMsg:
                     self.__processHandlersTimeout()
             except Exception, e:
                 self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
-    
+                    
     def close(self):
         try:
-            self.__lock.acquire()
             self.__mqttClient.disconnect()
             self.__mqttClient = None
             self.__sendMsgReplyHandlers = None
@@ -117,24 +119,18 @@ class InstaMsg:
             return - 1
         finally:
             thread.exit()
-            self.__lock.release()     
     
     def publish(self, topic, msg, qos=INSTAMSG_QOS0, dup=0, resultHandler=None, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
         if(self.__mqttClient and topic):
             try:
-                self.__lock.acquire()
                 self.__mqttClient.publish(topic, msg, qos, dup, resultHandler, timeout)
             except Exception, e:
                 raise InstaMsgPubError(str(e))
-            finally:
-                if(self.__mqttClient):
-                    self.__lock.release()
         else: raise ValueError("Topic cannot be null or empty string.")
     
     def subscribe(self, topic, qos, msgHandler, resultHandler, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
         if(self.__mqttClient):
             try:
-                self.__lock.acquire()
                 if(not callable(msgHandler)): raise ValueError('msgHandler should be a callable object.')
                 self.__msgHandlers[topic] = msgHandler
                 if(topic == self.__clientId):
@@ -148,9 +144,6 @@ class InstaMsg:
             except Exception, e:
                 self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = subscribe][%s]:: %s" % (e.__class__.__name__ , str(e)))
                 raise InstaMsgSubError(str(e))
-            finally:
-                if(self.__mqttClient):
-                    self.__lock.release()              
         else:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = subscribe][%s]:: %s" % ("InstaMsgSubError" + str(e)))
             raise InstaMsgSubError("Cannot subscribe as TCP is not enabled. Two way messaging only possible on TCP and not HTTP")
@@ -159,7 +152,6 @@ class InstaMsg:
     def unsubscribe(self, topics, resultHandler, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
         if(self.__mqttClient):
             try:
-                self.__lock.acquire()
                 def _resultHandler(result):
                     if(result.succeeded()):
                         for topic in topic:
@@ -170,9 +162,6 @@ class InstaMsg:
             except Exception, e:
                 self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = unsubscribe][%s]:: %s" % (e.__class__.__name__ , str(e)))
                 raise InstaMsgUnSubError(str(e))
-            finally:
-                if(self.__mqttClient):
-                    self.__lock.release()
         else:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = unsubscribe][%s]:: %s" % ("InstaMsgUnSubError" , str(e)))
             raise InstaMsgUnSubError("Cannot unsubscribe as TCP is not enabled. Two way messaging only possible on TCP and not HTTP")
@@ -226,7 +215,10 @@ class InstaMsg:
             if(self.__enableLogToServer):
                 self.log(level, msg)
             else:
-                print "[%s]%s" % (INSTAMSG_LOG_LEVEL[level], msg)
+                try:
+                    print "[%s]%s" % (INSTAMSG_LOG_LEVEL[level], msg)
+                except:
+                    pass
     
     def __handleMessage(self, mqttMsg):
         if(mqttMsg.topic == self.__clientId):
@@ -570,6 +562,7 @@ class MqttClient:
                             self.__lastPingReqTime = time.time()
                             self.__lastPingRespTime = None
                 self.__processHandlersTimeout()
+                time.sleep(1)
         except SocketError, msg:
             self.__resetInitSockNConnect()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = process][SocketError]:: %s" % (str(msg)))
@@ -870,10 +863,10 @@ class MqttClient:
             if(self.__sock is not None):
                 self.__closeSocket()
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Opening socket to %s:%s' % (self.host, str(self.port)))
-            if(self.sslEnabled is 0):
-                self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at)
-            else:
+            if(self.sslEnabled):
                 self.__sock = SslSocket(self.MQTT_SOCKET_TIMEOUT, at)
+            else:
+                self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at)
             self.__sock.connect((self.host, self.port))
             self.__sockInit = 1
             self.__waitingReconnect = 0
@@ -1872,7 +1865,7 @@ class Socket:
             raise SocketConfigError('Unable to configure socket')
         
     def __socketStatus(self):
-        return int(self.__at.socketStatus(self._sockno).split(',')[1])
+        return int(at2.socketStatus(self._sockno).split(',')[1])
     
     def connect(self, addr):
         try:
@@ -1939,23 +1932,18 @@ class Socket:
             return self.__at.socketSend(self._sockno, data, len(data), self._timeout + 3, 0)
         except self.__at.timeout:
             raise SocketTimeoutError('Timed out.')
-        except:
-            raise SocketError('Error in send data.')
+        except Exception, e:
+            raise SocketError('Error in send data - %s' % str(e))
                  
     def sendall(self, data):
         try:
             ss = self.__socketStatus()
             if(not ss):raise SocketError(self.socketStates[ss])
-            i = 0
-            while(data):
-                partData = data[:1500]
-                sendDataSize = self.__at.socketSend(self._sockno, partData, len(partData), self._timeout + 3, i)
-                data = data[sendDataSize:]
-                i = i + 1
+            return self.__at.socketSend(self._sockno, data, len(data), self._timeout + 3, 0)
         except self.__at.timeout:
             raise SocketTimeoutError('Timed out.')
-        except:
-            raise SocketError('Error in sendall data.')  
+        except Exception, e:
+            raise SocketError('Error in sendall - %s' % str(e)) 
 
 ####Secure(ssl) Socket class ###############################################################################
 class SslSocket(Socket):
@@ -1981,8 +1969,8 @@ class SslSocket(Socket):
         self._sockno = 1
         self.connected = 0
         self.__at = at
-        self._cipherSuite=0
-        self._authMode=0
+        self._cipherSuite = 0
+        self._authMode = 0
         self.__enableSslSocket()
         self.__configureSslSocketSecurity()
         self.__configureSocket()
@@ -2086,7 +2074,7 @@ class TimeHelper:
     def getTimeAndOffset(self):
         try:
             t = self.asctime()
-            now = self.localtime( t)
+            now = self.localtime(t)
             timestr = "%04d%02d%02d%01d%02d%02d%02d" % (now[0], now[1], (now[2]), (now[6]), now[3], now[4], now[5])
             offset = str(self.__getOffset(t))
             return [timestr, offset]
@@ -2330,14 +2318,23 @@ class At:
         self.__lock = thread.allocate_lock()
 #        self.sendCmd('ATE1')
     
-    def sendCmd(self, cmd, timeOut=2, expected='OK\r\n', addCR=1):
+    def sendCmd(self, cmd, timeOut=2, expected='OK\r\n', addCR=1, acquireLock=1):
         try:
-            self.__lock.acquire()
             if (timeOut <= 0): timeOut = 2
-            if (addCR == 1):
-                r = self.__mdm.send(cmd + '\r', 5)
-            else:
-                r = self.__mdm.send(cmd, 5)
+            if(acquireLock and not self.__lock.acquire(0)):
+                raise self.timeout("Unable to acquire lock.")
+            #Do not use stamements in this try block 
+            #that call sendCmd e.g. print that uses logger
+            #As it will try to again take a lock on thread already 
+            #locked by it. There is no support RLock so retrying lock will fail
+            try:
+                if (addCR == 1):
+                    r = self.__mdm.send(cmd + '\r', 5)
+                else:
+                    r = self.__mdm.send(cmd, 5)
+            finally:
+                if(acquireLock):
+                    self.__lock.release()   
             if (r < 0):
                 raise self.timeout('Send "%s" timed out.' % cmd)
             timer = time.time() + timeOut
@@ -2362,9 +2359,7 @@ class At:
         except self.timeout, e:
             raise self.timeout(str(e))
         except Exception, e:
-            raise self.error("UnexpectedError, command %s failed." % cmd)
-        finally:
-            self.__lock.release() 
+            raise self.error("UnexpectedError, command %s failed. %s" % (cmd, str(e)))
     
     # Module AT commands
 
@@ -2763,9 +2758,17 @@ class At:
     
     def socketSend(self, connId, data, bytestosend, timeout, multiPart=0):
     # bytestosend(1-1500)
-        if(multiPart == 0):
-            self.sendCmd('AT#SSENDEXT=%d,%d' % (connId, bytestosend), 1, '')
-        self.sendCmd(data, timeout, expected='OK\r\n', addCR=0)
+        while(data):
+            partData = data[:1500]
+            sendDataSize = len(partData)
+            if(not self.__lock.acquire(0)):
+                raise self.timeout("Unable to acquire lock.")
+            try:
+                self.sendCmd('AT#SSENDEXT=%d,%d' % (connId, sendDataSize), 1, '', acquireLock=0)
+                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0, acquireLock=0)
+            finally:
+                self.__lock.release()
+            data = data[sendDataSize:]
         return bytestosend
 
     def sslSocketSend(self, connId, data, bytestosend, timeout, multiPart=0):
@@ -2940,4 +2943,3 @@ class SerialTimeoutError(IOError):
     
 at = instamsg.At()
 at2 = instamsg.At(mdm=2)
-#time = instamsg.TimeHelper()
