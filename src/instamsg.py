@@ -832,7 +832,7 @@ class MqttClient:
         self.__msgIdInbox.remove(mqttMessage.messageId)
     
     def __handlePubRecMsg(self, mqttMessage):
-        fixedHeader = MqttFixedHeader(self.PUBREL)
+        fixedHeader = MqttFixedHeader(self.PUBREL,1)
         variableHeader = {'messageId': mqttMessage.messageId}
         pubRelMsg = self.__mqttMsgFactory.message(fixedHeader, variableHeader)
         encodedMsg = self.__mqttEncoder.encode(pubRelMsg)
@@ -2042,22 +2042,16 @@ class SslSocket(Socket):
             raise SocketTimeoutError('Timed out.')
         except:
             raise SocketError('Error in send data.')
-                 
+        
     def sendall(self, data):
         try:
             ss = self.__socketStatus()
             if(not ss):raise SocketError(self.socketStates[ss])
-            i = 0
-            while(data):
-                partData = data[:1500]
-                sendDataSize = self.__at.sslSocketSend(self._sockno, partData, len(partData), self._timeout + 3, i)
-                data = data[sendDataSize:]
-                i = i + 1
+            return self.__at.sslSocketSend(self._sockno, data, len(data), self._timeout + 3, 0)
         except self.__at.timeout:
             raise SocketTimeoutError('Timed out.')
-        except:
-            raise SocketError('Error in sendall data.')  
-
+        except Exception, e:
+            raise SocketError('Error in sendall - %s' % str(e)) 
 
 #####Time##################################################################################  
 class TimeHelper:
@@ -2773,9 +2767,17 @@ class At:
 
     def sslSocketSend(self, connId, data, bytestosend, timeout, multiPart=0):
     # bytestosend(1-1500)
-        if(multiPart == 0):
-            self.sendCmd('AT#SSLSENDEXT=%d,%d' % (connId, bytestosend), 1, '')
-        self.sendCmd(data, timeout, expected='OK\r\n', addCR=0)
+        while(data):
+            partData = data[:1500]
+            sendDataSize = len(partData)
+            if(not self.__lock.acquire(0)):
+                raise self.timeout("Unable to acquire lock.")
+            try:
+                self.sendCmd('AT#SSLSENDEXT=%d,%d' % (connId, sendDataSize), 1, '', acquireLock=0)
+                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0, acquireLock=0)
+            finally:
+                self.__lock.release()
+            data = data[sendDataSize:]
         return bytestosend
     
     def socketStatus(self, connId=None):
@@ -2943,3 +2945,5 @@ class SerialTimeoutError(IOError):
     
 at = instamsg.At()
 at2 = instamsg.At(mdm=2)
+
+#time = instamsg.TimeHelper()
