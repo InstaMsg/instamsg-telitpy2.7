@@ -27,7 +27,7 @@ INSTAMSG_QOS2 = 2
 
 class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
-    INSTAMSG_KEEP_ALIVE_TIMER = 120
+    INSTAMSG_KEEP_ALIVE_TIMER = 3600
     INSTAMSG_RECONNECT_TIMER = 90
     INSTAMSG_HOST = "device.instamsg.io"
     INSTAMSG_PORT = 1883
@@ -51,6 +51,7 @@ class InstaMsg:
         self.__oneToOneMessageHandler = oneToOneMessageHandler
         self.__filesTopic = "instamsg/clients/" + clientId + "/files";
         self.__fileUploadUrl = "/api/%s/clients/%s/files" % (self.INSTAMSG_API_VERSION, clientId)
+        self.__systemRebootTopic = clientId + "/system/reboot"
         self.__defaultReplyTimeout = self.INSTAMSG_RESULT_HANDLER_TIMEOUT
         self.__msgHandlers = {}
         self.__sendMsgReplyHandlers = {}  # {handlerId:{time:122334,handler:replyHandler, timeout:10, timeOutMsg:"Timed out"}}
@@ -225,6 +226,8 @@ class InstaMsg:
             self.__handlePointToPointMessage(mqttMsg)
         elif(mqttMsg.topic == self.__filesTopic):
             self.__handleFileTransferMessage(mqttMsg)
+        elif(mqttMsg.topic == self.__systemRebootTopic):
+            self.__handleSystemRebootMessage(mqttMsg)
         else:
             msg = Message(mqttMsg.messageId, mqttMsg.topic, mqttMsg.payload, mqttMsg.fixedHeader.qos, mqttMsg.fixedHeader.dup)
             msgHandler = self.__msgHandlers.get(mqttMsg.topic)
@@ -311,6 +314,9 @@ class InstaMsg:
     
     def __deleteFile(self, filename):
         unlink(filename)
+        
+    def __handleSystemRebootMessage(self, mqttMsg):
+        at.reboot()
         
     def __handlePointToPointMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
@@ -558,7 +564,7 @@ class MqttClient:
                         if (self.__lastPingRespTime is None):
                             self.disconnect()
                         else: 
-                            self.__sendPingReq()
+#                            self.__sendPingReq()
                             self.__lastPingReqTime = time.time()
                             self.__lastPingRespTime = None
                 self.__processHandlersTimeout()
@@ -606,6 +612,7 @@ class MqttClient:
     
     def publish(self, topic, payload, qos=MQTT_QOS0, dup=0, resultHandler=None, resultHandlerTimeout=MQTT_RESULT_HANDLER_TIMEOUT, retain=0):
         if(not self.__connected or self.__connecting  or self.__waitingReconnect):
+            self.connect()
             raise MqttClientError("Cannot publish message as not connected.")
         self.__validateTopic(topic)
         self.__validateQos(qos)
@@ -832,7 +839,7 @@ class MqttClient:
         self.__msgIdInbox.remove(mqttMessage.messageId)
     
     def __handlePubRecMsg(self, mqttMessage):
-        fixedHeader = MqttFixedHeader(self.PUBREL,1)
+        fixedHeader = MqttFixedHeader(self.PUBREL, 1)
         variableHeader = {'messageId': mqttMessage.messageId}
         pubRelMsg = self.__mqttMsgFactory.message(fixedHeader, variableHeader)
         encodedMsg = self.__mqttEncoder.encode(pubRelMsg)
@@ -1861,8 +1868,8 @@ class Socket:
                 self.__at.configureSocket(connId=self._sockno, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp)
             else:
                 raise SocketMaxCountError('All sockets in use. Total number of socket cannot exceed %d.' % self.maxconn)
-        except:
-            raise SocketConfigError('Unable to configure socket')
+        except Exception, e:
+            raise SocketConfigError('Unable to configure socket - %s' % str(e))
         
     def __socketStatus(self):
         return int(at2.socketStatus(self._sockno).split(',')[1])
@@ -2781,10 +2788,11 @@ class At:
         return bytestosend
     
     def socketStatus(self, connId=None):
+        cmd = self.sendCmd('AT#SS')
         if(connId):
-            return self.sendCmd('AT#SS').split('\r\n')[connId].replace('#SS: ', '')
+            return cmd.split('\r\n')[connId].replace('#SS: ', '')
         else:
-            return self.sendCmd('AT#SS').replace('#SS: ', '').split('\r\n')[1:6]
+            return cmd.replace('#SS: ', '').split('\r\n')[1:6]
     
     def sslSocketStatus(self, connId=None):
         if(connId):
