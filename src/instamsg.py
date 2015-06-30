@@ -6,6 +6,7 @@ import sys
 import time
 import thread
 import instamsg
+import posix
 
 ####InstaMsg ###############################################################################
 # Logging Levels
@@ -27,7 +28,7 @@ INSTAMSG_QOS2 = 2
 
 class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
-    INSTAMSG_KEEP_ALIVE_TIMER = 3600
+    INSTAMSG_KEEP_ALIVE_TIMER = 90
     INSTAMSG_RECONNECT_TIMER = 90
     INSTAMSG_HOST = "device.instamsg.io"
     INSTAMSG_PORT = 1883
@@ -51,7 +52,9 @@ class InstaMsg:
         self.__oneToOneMessageHandler = oneToOneMessageHandler
         self.__filesTopic = "instamsg/clients/" + clientId + "/files";
         self.__fileUploadUrl = "/api/%s/clients/%s/files" % (self.INSTAMSG_API_VERSION, clientId)
-        self.__systemRebootTopic = clientId + "/system/reboot"
+        self.__serverLogging = "instamsg/clients/" + clientId + "/enableServerLogging";
+        self.__serverLogs = "instamsg/clients/" + clientId + "/logs"
+        self.__logsListener = []
         self.__defaultReplyTimeout = self.INSTAMSG_RESULT_HANDLER_TIMEOUT
         self.__msgHandlers = {}
         self.__sendMsgReplyHandlers = {}  # {handlerId:{time:122334,handler:replyHandler, timeout:10, timeOutMsg:"Timed out"}}
@@ -177,7 +180,13 @@ class InstaMsg:
             raise InstaMsgSendError(str(e))
         
     def log(self, level, message):
-        pass
+        if(self.__enableLogToServer):
+            self.publish(self.__serverLogs, message, 1)
+        else:
+            try:
+                print "[%s]%s" % (INSTAMSG_LOG_LEVEL[level], msg)
+            except:
+                pass
     
     def _send(self, messageId, clienId, msg, qos, dup, replyHandler, timeout):
         try:
@@ -203,8 +212,27 @@ class InstaMsg:
             messageId = time.time()
         return messageId;
     
+    def __enableServerLogging(self, msg):
+        if (msg):
+            msgJson = self.__parseJson(msg.body());
+            if (msgJson is not None and (msgJson.has_key('client_id') and (msgJson.has_key('logging')))):
+                clientId = str(msgJson['client_id'])
+                logging = msgJson['logging']
+                if (logging):
+                    if(not self.__logsListener.__contains__(clientId)):
+                        self.__logsListener.append(clientId)
+                        self.__enableLogToServer = 1;
+                    else:
+                        if(self.__logsListener.__contains__(clientId)):
+                            self.__logsListener.remove(clientId);
+                        if (len(self.__logsListener) == 0):
+                            self.__enableLogToServer = 0;
+    
     def __onConnect(self, mqttClient):
         self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]:: Client connected to InstaMsg IOT cloud service.")
+        def _resultHandler(result):
+            print "Subscribed to topic %s " % (self.__serverLogging)
+        self.subscribe(self.__serverLogging, 1, self.__enableServerLogging, _resultHandler)
         if(self.__onConnectCallBack): self.__onConnectCallBack(self)  
         
     def __onDisConnect(self):
@@ -226,8 +254,6 @@ class InstaMsg:
             self.__handlePointToPointMessage(mqttMsg)
         elif(mqttMsg.topic == self.__filesTopic):
             self.__handleFileTransferMessage(mqttMsg)
-        elif(mqttMsg.topic == self.__systemRebootTopic):
-            self.__handleSystemRebootMessage(mqttMsg)
         else:
             msg = Message(mqttMsg.messageId, mqttMsg.topic, mqttMsg.payload, mqttMsg.fixedHeader.qos, mqttMsg.fixedHeader.dup)
             msgHandler = self.__msgHandlers.get(mqttMsg.topic)
@@ -269,6 +295,7 @@ class InstaMsg:
                         msg = '{"response_id": "%s", "status": 0}' % (messageId)
                     self.publish(replyTopic, msg, qos, dup)
                 elif ((method == "POST" or method == "PUT") and filename and url):
+                    httpClient = HTTPClient(self.INSTAMSG_HTTP_HOST, self.__httpPort)
                     httpResponse = httpClient.downloadFile(url, filename)
                     if(httpResponse and httpResponse.status == 200):
                         msg = '{"response_id": "%s", "status": 1}' % (messageId)
@@ -313,10 +340,7 @@ class InstaMsg:
         return str(fileList).replace("'", '"')   
     
     def __deleteFile(self, filename):
-        unlink(filename)
-        
-    def __handleSystemRebootMessage(self, mqttMsg):
-        at.reboot()
+        posix.unlink(filename)
         
     def __handlePointToPointMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
@@ -564,7 +588,7 @@ class MqttClient:
                         if (self.__lastPingRespTime is None):
                             self.disconnect()
                         else: 
-#                            self.__sendPingReq()
+                            self.__sendPingReq()
                             self.__lastPingReqTime = time.time()
                             self.__lastPingRespTime = None
                 self.__processHandlersTimeout()
@@ -853,6 +877,7 @@ class MqttClient:
         self.__sockInit = 0
         self.__connected = 0
         self.__connecting = 0
+        self.__disconnecting = 0
         self.__lastPingReqTime = time.time()
         self.__lastPingRespTime = self.__lastPingReqTime
         
@@ -1471,6 +1496,9 @@ class HTTPResponse:
             self.__init()
 #             data_block = self.__sock.recv()
             data_block = self.__sock.recv(1500)
+            print "XXXXXXXX"
+            print str(data_block)
+            print "xxxxxxxxx"
             while(data_block):
                 self.__lines = self.__lines + data_block.split(self.__crlf)
                 if(len(self.__lines) > 0):
@@ -1519,6 +1547,11 @@ class HTTPResponse:
     def __readStatus(self):
         try:
             statusLine = self.__lines.pop(0)
+            print "AAAA"
+            print str(self.__lines)
+            print "BBBBBBBB"
+            print statusLine
+            print "CCCCC"
             [version, status, reason] = statusLine.split(None, 2)
         except ValueError:
             try:
@@ -1657,7 +1690,8 @@ class HTTPClient:
                 fileSize = self.__getFileSize(filename)
                 headers['Content-Length'] = len(''.join(form)) + fileSize
                 f = open(filename, 'rb')
-                return self.__request('POST', url, params, headers, f, timeout, form)  
+                response = self.__request('POST', url, params, headers, f, timeout, form)  
+                return response
             except Exception, e:
                 if(e.__class__.__name__ == 'HTTPResponseError'):
                     raise HTTPResponseError(str(e))
@@ -1677,9 +1711,9 @@ class HTTPClient:
                 response = self.__request('GET', url, params, headers, timeout=timeout, fileObject=f)
                 f.close()
                 if(response.status == 200):
-                    rename(tempFileName, filename)
+                    posix.rename(tempFileName, filename)
                 else:
-                    unlink(tempFileName)
+                    posix.unlink(tempFileName)
             except Exception, e:
                 if(e.__class__.__name__ == 'HTTPResponseError'):
                     raise HTTPResponseError(str(e))
@@ -1699,6 +1733,7 @@ class HTTPClient:
           
     def __getFileSize(self, filename):
         fileSize = None
+        f = None
         try:
             try:
                 f = open(filename, 'ab')
@@ -1745,6 +1780,7 @@ class HTTPClient:
                         raise HTTPResponseError("Expecting status 100, recieved %s" % request.status)
                 else:
                     self.__send(request, body, fileUploadForm, fileObject, sizeHint)
+                    time.sleep(2)
                     return HTTPResponse(self._sock, fileObject).response()
             except Exception, e:
                 if(e.__class__.__name__ == 'HTTPResponseError'):
@@ -2319,7 +2355,7 @@ class At:
         self.__lock = thread.allocate_lock()
 #        self.sendCmd('ATE1')
     
-    def sendCmd(self, cmd, timeOut=2, expected='OK\r\n', addCR=1, acquireLock=1):
+    def sendCmd(self, cmd, timeOut=2, expected='\r\nOK\r\n', addCR=1, acquireLock=1):
         try:
             if (timeOut <= 0): timeOut = 2
             if(acquireLock and not self.__lock.acquire(0)):
@@ -2347,7 +2383,7 @@ class At:
                 if (timeOut > 0):
                     raise self.error('Expected response "%s" not received.' % expected.strip())
                 else:
-                    raise self.timeout('%s receive timed out for .' % (self.__mdm.__class__.__name__, cmd))
+                    raise self.timeout('%s receive timed out for %s.' % (self.__mdm.__class__.__name__, cmd))
             if(response.find('ERROR') > 0):
                 raise self.error('%s ERROR response received for "%s".' % (self.__mdm.__class__.__name__, cmd)) 
             else:
@@ -2377,7 +2413,13 @@ class At:
             return 1
         except:
             return 0
-        
+     
+    def getManufacturerIdentification(self):
+        try:
+            return self.sendCmd('AT+GMI', 1).split('\r\n')[1]
+        except:
+            return ''
+            
     def getModel(self):
         try:
             return self.sendCmd('AT+GMM', 1).split('\r\n')[1]
@@ -2446,7 +2488,7 @@ class At:
             return int(self.sendCmd('AT#GSMAD=3', 10).split('\r\n')[1].split(':')[1])
         except:
             return - 1
-    
+        
     def getActiveScript(self):
         resp = self.sendCmd('AT#ESCRIPT?', 1).split('\r\n')
         expectedResponse = '#ESCRIPT: '
@@ -2470,6 +2512,10 @@ class At:
                 if(len(fileinfo) == 2):
                     fileList[fileinfo[0]] = int(fileinfo[1])
         return fileList
+    
+    def deleteFile(self, filename):
+        resp = self.sendCmd('AT#DSCRIPT = "%s"' % str(filename)).split('\r\n')
+        return resp
     
     # Time AT commands
     
@@ -2700,6 +2746,17 @@ class At:
         except:
             return 0
         
+    def getGPRSAddress(self, connId=1):
+        resp = self.sendCmd('AT+CGPADDR=', 1).split('\r\n')
+        i, expectedResponse = 0, "+CGPADDR: %d" % connId
+        for r in resp:
+            i = i + 1
+            if(r.find(expectedResponse) == 0):
+                res = r.split(',')
+                return res[1]
+                break
+        return ''
+    
     def setGPRSContextConfig(self, pdpContextId=1, retry=15, delay=180):
         self.sendCmd('AT#SGACTCFG=%d,%d,%d' % (pdpContextId, retry, delay))
          
@@ -2740,22 +2797,22 @@ class At:
         self.sendCmd('AT#SSLH=%d' % connId, timeout)
     
     def socketRecv(self, connId, maxByte, timeout):
-        resp = self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout).split('\r\n')
+        resp = self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout).strip('\r\nOK\r\n').split('\r\n')
         i, expectedResponse = 0, "#SRECV: %d" % connId
         for r in resp:
             i = i + 1
             if(r.find(expectedResponse) == 0):
                 break
-        return resp[i]
+        return '\r\n'.join(resp[i:len(resp)])
     
     def sslSocketRecv(self, connId, maxByte, timeout):
-        resp = self.sendCmd('AT#SSLRECV=%d,%d' % (connId, maxByte), timeout).split('\r\n')
+        resp = self.sendCmd('AT#SSLRECV=%s,%s' % (str(connId), str(maxByte)), timeout).strip('\r\nOK\r\n').split('\r\n')
         i, expectedResponse = 0, "#SSLRECV:" 
         for r in resp:
             i = i + 1
             if(r.find(expectedResponse) == 0):
                 break
-        return resp[i]
+        return '\r\n'.join(resp[i:len(resp)])
     
     def socketSend(self, connId, data, bytestosend, timeout, multiPart=0):
     # bytestosend(1-1500)
