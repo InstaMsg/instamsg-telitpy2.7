@@ -25,6 +25,8 @@ INSTAMSG_ERROR_AUTHENTICATION = 3
 INSTAMSG_QOS0 = 0
 INSTAMSG_QOS1 = 1
 INSTAMSG_QOS2 = 2
+# InstaMsg Versions // Update every time when some changes happened in this file.
+INSTAMSG_VERSION = "15.08.00"
 
 class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
@@ -54,6 +56,9 @@ class InstaMsg:
         self.__fileUploadUrl = "/api/%s/clients/%s/files" % (self.INSTAMSG_API_VERSION, clientId)
         self.__serverLogging = "instamsg/clients/" + clientId + "/enableServerLogging";
         self.__serverLogs = "instamsg/clients/" + clientId + "/logs"
+        self.__REBOOT_TOPIC = "instamsg/clients/" + clientId + "/reboot"
+        self.__METADATA = "instamsg/client/metadata"
+        self.__SESSION_DATA = "instamsg/client/session"
         self.__logsListener = []
         self.__defaultReplyTimeout = self.INSTAMSG_RESULT_HANDLER_TIMEOUT
         self.__msgHandlers = {}
@@ -61,6 +66,7 @@ class InstaMsg:
         self.__sslEnabled = 0
         self.__initOptions(options)
         self.__lock = thread.allocate_lock()
+        self._broker = None
         if(self.__enableTcp):
             clientIdAndUsername = self.__getClientIdAndUsername(clientId)
             mqttoptions = self.__mqttClientOptions(clientIdAndUsername[1], authKey, self.__keepAliveTimer, self.__sslEnabled)
@@ -99,9 +105,6 @@ class InstaMsg:
             self.__port = self.INSTAMSG_PORT
             self.__httpPort = self.INSTAMSG_HTTP_PORT
             
-    def process(self):
-        self.__process()
-        
     def __process(self):
         while 1:
             try:
@@ -184,7 +187,7 @@ class InstaMsg:
             self.publish(self.__serverLogs, message, 1)
         else:
             try:
-                print "[%s]%s" % (INSTAMSG_LOG_LEVEL[level], msg)
+                print "[%s]%s" % (INSTAMSG_LOG_LEVEL[level], message)
             except:
                 pass
     
@@ -233,7 +236,19 @@ class InstaMsg:
         def _resultHandler(result):
             print "Subscribed to topic %s " % (self.__serverLogging)
         self.subscribe(self.__serverLogging, 1, self.__enableServerLogging, _resultHandler)
+        self.__sendClientMetadata()
+        self.__sendClientSessionData()
         if(self.__onConnectCallBack): self.__onConnectCallBack(self)  
+        
+    def __sendClientSessionData(self):
+        ipAddress = at.getGPRSAddress(1)
+        session = {'method':"GPRS", 'ip_address':ipAddress, 'antina_status': at.getAntennaStatus(), 'signal_strength': str(at.getSignalQuality())}
+        self.publish(self.__SESSION_DATA, str(session), INSTAMSG_QOS1, 0)
+    
+    def __sendClientMetadata(self):
+        metadata = {'imei': at.getIMEI(), 'serial_number': at.getIMEI(), 'model': at.getModel(),
+                    'firmware_version': at.getFirmwareVersion(), 'manufacturer': at.getManufacturerIdentification(), "code_version" : INSTAMSG_VERSION}
+        self.publish(self.__METADATA, str(metadata), INSTAMSG_QOS1, 0)
         
     def __onDisConnect(self):
         self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]:: Client disconnected from InstaMsg IOT cloud service.")
@@ -254,6 +269,8 @@ class InstaMsg:
             self.__handlePointToPointMessage(mqttMsg)
         elif(mqttMsg.topic == self.__filesTopic):
             self.__handleFileTransferMessage(mqttMsg)
+        elif(mqttMessage.topic() == self.__REBOOT_TOPIC):
+            self.__handleSystemRebootMessage()
         else:
             msg = Message(mqttMsg.messageId, mqttMsg.topic, mqttMsg.payload, mqttMsg.fixedHeader.qos, mqttMsg.fixedHeader.dup)
             msgHandler = self.__msgHandlers.get(mqttMsg.topic)
@@ -341,6 +358,10 @@ class InstaMsg:
     
     def __deleteFile(self, filename):
         posix.unlink(filename)
+        
+    def __handleSystemRebootMessage(self):
+        self.log(INSTAMSG_LOG_LEVEL[level], "Rebooting device.") 
+        at.reboot()
         
     def __handlePointToPointMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
@@ -642,7 +663,7 @@ class MqttClient:
         self.__validateQos(qos)
         self.__validateResultHandler(resultHandler)
         self.__validateTimeout(resultHandlerTimeout)
-        fixedHeader = MqttFixedHeader(self.PUBLISH, qos=self.MQTT_QOS0, dup=0, retain=0)
+        fixedHeader = MqttFixedHeader(self.PUBLISH, qos, dup=0, retain=0)
         messageId = 0
         if(qos > self.MQTT_QOS0): messageId = self.__generateMessageId()
         variableHeader = {'messageId': messageId, 'topic': str(topic)}
@@ -1494,11 +1515,7 @@ class HTTPResponse:
     def response(self):  
         try:
             self.__init()
-#             data_block = self.__sock.recv()
             data_block = self.__sock.recv(1500)
-            print "XXXXXXXX"
-            print str(data_block)
-            print "xxxxxxxxx"
             while(data_block):
                 self.__lines = self.__lines + data_block.split(self.__crlf)
                 if(len(self.__lines) > 0):
@@ -1547,11 +1564,6 @@ class HTTPResponse:
     def __readStatus(self):
         try:
             statusLine = self.__lines.pop(0)
-            print "AAAA"
-            print str(self.__lines)
-            print "BBBBBBBB"
-            print statusLine
-            print "CCCCC"
             [version, status, reason] = statusLine.split(None, 2)
         except ValueError:
             try:
@@ -2996,17 +3008,6 @@ class InstaMsgSendError(InstaMsgError):
     def __str__(self):
         return repr(self.value)
     
-class SerialError(IOError):
-    def __init__(self, value=''):
-        self.value = value
-    def __str__(self):
-        return repr(self.value)
-
-class SerialTimeoutError(IOError):
-    def __init__(self, value=''):
-        self.value = value
-    def __str__(self):
-        return repr(self.value)
     
 at = instamsg.At()
 at2 = instamsg.At(mdm=2)

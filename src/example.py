@@ -99,11 +99,11 @@ class Logger:
         self.debugFile.close()
     
 def __onConnect(instaMsg):
-#     topic = "62513710-86c0-11e4-9dcf-a41f726775dd"
-    topic = "abc"
+    topic = "instamsg/webhook/"
     qos = 0
     __subscribe(instaMsg, topic, qos)
-    __publishMessage(instaMsg, "abc", "XXXXX ssl testing",1, 0)
+    msg = "XXXXX ssl testing"
+    __publishMessage(instaMsg, "abc", msg,1, 0)
     time.sleep(60)
     __publishMessage(instaMsg, "abc", "Hello Java",1, 0)
 #    __subscribe(instaMsg, "99533d950-c88b-11e4-bf22-bc764e102b63", qos)
