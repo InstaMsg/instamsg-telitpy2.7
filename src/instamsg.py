@@ -7,6 +7,7 @@ import time
 import thread
 import instamsg
 import posix
+    
 
 ####InstaMsg ###############################################################################
 # Logging Levels
@@ -25,8 +26,7 @@ INSTAMSG_ERROR_AUTHENTICATION = 3
 INSTAMSG_QOS0 = 0
 INSTAMSG_QOS1 = 1
 INSTAMSG_QOS2 = 2
-# InstaMsg Versions // Update every time when some changes happened in this file.
-INSTAMSG_VERSION = "15.08.00"
+
 
 class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
@@ -41,6 +41,8 @@ class InstaMsg:
     INSTAMSG_API_VERSION = "beta"
     INSTAMSG_RESULT_HANDLER_TIMEOUT = 10    
     INSTAMSG_MSG_REPLY_HANDLER_TIMEOUT = 10
+    # InstaMsg Versions // Update every time when some changes happened in this file.
+    INSTAMSG_VERSION = "15.08.00"
     
     def __init__(self, clientId, authKey, connectHandler, disConnectHandler, oneToOneMessageHandler, options={}):
         if(not callable(connectHandler)): raise ValueError('connectHandler should be a callable object.')
@@ -242,14 +244,14 @@ class InstaMsg:
         
     def __sendClientSessionData(self):
         ipAddress = at.getGPRSAddress(1)
-        session = {'method':"GPRS", 'ip_address':ipAddress, 'antina_status': at.getAntennaStatus(), 'signal_strength': str(at.getSignalQuality())}
+        session = {'method':"GPRS", 'ip_address':ipAddress, 'antina_status': at.getAntennaStatus(), 'signal_strength': str(self.__mqttClient.getSignalStrength())}
         self.publish(self.__SESSION_DATA, str(session), INSTAMSG_QOS1, 0)
     
     def __sendClientMetadata(self):
         metadata = {'imei': at.getIMEI(), 'serial_number': at.getIMEI(), 'model': at.getModel(),
-                    'firmware_version': at.getFirmwareVersion(), 'manufacturer': at.getManufacturerIdentification(), "code_version" : INSTAMSG_VERSION}
+                    'firmware_version': at.getFirmwareVersion(), 'manufacturer': at.getManufacturerIdentification(), "client_version" : self.INSTAMSG_VERSION}
         self.publish(self.__METADATA, str(metadata), INSTAMSG_QOS1, 0)
-        
+            
     def __onDisConnect(self):
         self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]:: Client disconnected from InstaMsg IOT cloud service.")
         if(self.__onDisConnectCallBack): self.__onDisConnectCallBack()  
@@ -561,6 +563,9 @@ class MqttClient:
     MQTT_QOS0 = 0
     MQTT_QOS1 = 1
     MQTT_QOS2 = 2
+    # Extra var
+    SIGNALINFO_PERIODIC_INTERVAL = 300
+    
 
     def __init__(self, host, port, clientId, options={}):
         if(not clientId):
@@ -598,6 +603,8 @@ class MqttClient:
         self.__onDebugMessageCallBack = None
         self.__msgIdInbox = []
         self.__resultHandlers = {}  # {handlerId:{time:122334,handler:replyHandler, timeout:10, timeOutMsg:"Timed out"}}
+        self.__NETWORK_DATA = "instamsg/client/signalinfo"
+        self.__signalInfoPublishTimer = time.time()
         
     def process(self):
         try:
@@ -612,6 +619,8 @@ class MqttClient:
                             self.__sendPingReq()
                             self.__lastPingReqTime = time.time()
                             self.__lastPingRespTime = None
+                    if (self.__connected):
+                        self.__publishNetworkStrengthInfo()
                 self.__processHandlersTimeout()
                 time.sleep(1)
         except SocketError, msg:
@@ -738,7 +747,24 @@ class MqttClient:
         if(callable(callback)):
             self.__onMessageCallBack = callback
         else:
-            raise ValueError('Callback should be a callable object.') 
+            raise ValueError('Callback should be a callable object.')
+    
+    def getSignalStrength(self):
+        try:
+            quality = self.__parseJson(str(at.getSignalQuality()))
+            return (-113 + int((2 * int(quality[0]))))
+        except:
+            return -1
+        
+    def __parseJson(self, jsonString):
+        return eval(jsonString)  # Hack as not implemented Json Library 
+          
+    def __publishNetworkStrengthInfo(self):
+        if(self.__signalInfoPublishTimer - time.time() <= 0):
+            signalInfo = {'antina_status': at.getAntennaStatus(), 'signal_strength': str(self.getSignalStrength())}
+            print ("publishing signal info : %s" % str(signalInfo))
+            self.__signalInfoPublishTimer = self.__signalInfoPublishTimer + self.SIGNALINFO_PERIODIC_INTERVAL
+            self.publish(self.__NETWORK_DATA, str(signalInfo), self.MQTT_QOS1, 0)
         
     def __validateTopic(self, topic):
         if(topic):
