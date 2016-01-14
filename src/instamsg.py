@@ -808,26 +808,34 @@ class MqttClient:
         except SocketError, msg:
             self.__resetInitSockNConnect()
             raise SocketError(str("Socket error in send: %s. Connection reset." % (str(msg))))
-            
-            
+
+
     def __receive(self):
         try:
+
             data = self.__sock.recv(self.MAX_BYTES_MDM_READ)
-            if data: 
+            if data:
                 mqttMsg = self.__mqttDecoder.decode(data)
             else:
                 mqttMsg = None
             if (mqttMsg):
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Received message:%s' % mqttMsg.toString())
-                self.__handleMqttMessage(mqttMsg) 
+                self.__handleMqttMessage(mqttMsg)
+
         except MqttDecoderError, msg:
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
+
         except SocketTimeoutError:
             pass
+
         except (MqttFrameError, SocketError), msg:
+
+            # Very important to reset the decoder in case of socket-error.
+            self.__mqttDecoder.reinit()
+
             self.__resetInitSockNConnect()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
-            
+
     def __handleMqttMessage(self, mqttMessage):
         self.__lastPingRespTime = time.time()
         msgType = mqttMessage.fixedHeader.messageType
@@ -999,51 +1007,76 @@ class MqttDecoder:
     DISCARDING_MESSAGE = 4
     MESSAGE_READY = 5
     BAD = 6
-    
+
     def __init__(self):
         self.__data = ''
         self.__init()
         self.__msgFactory = MqttMsgFactory()
-        
+
     def __state(self):
         return self.__state
-    
+
     def decode(self, data):
-        if(data):
-            self.__data = self.__data + data
+
+        # Whenever this method is called, we have the data
+        self.__data = self.__data + data
+
+        while(True):
+
             if(self.__state == self.READING_FIXED_HEADER_FIRST):
                 self.__decodeFixedHeaderFirstByte(self.__getByteStr())
                 self.__state = self.READING_FIXED_HEADER_REMAINING
-            if(self.__state == self.READING_FIXED_HEADER_REMAINING):
+
+            elif(self.__state == self.READING_FIXED_HEADER_REMAINING):
                 self.__decodeFixedHeaderRemainingLength()
+
                 if (self.__fixedHeader.messageType == MqttClient.PUBLISH and not self.__variableHeader):
                     self.__initPubVariableHeader()
-            if(self.__state == self.READING_VARIABLE_HEADER):
+
+                # At this point, we proceed only if we have already received all the remaining bytes.
+                if( len(self.__data) < self.__remainingLength):
+                    return
+
+            elif(self.__state == self.READING_VARIABLE_HEADER):
                 self.__decodeVariableHeader()
-            if(self.__state == self.READING_PAYLOAD):
+
+            elif(self.__state == self.READING_PAYLOAD):
                 bytesRemaining = self.__remainingLength - (self.__bytesConsumedCounter - self.__remainingLengthCounter - 1)
                 self.__decodePayload(bytesRemaining)
-            if(self.__state == self.DISCARDING_MESSAGE):
+
+            elif(self.__state == self.DISCARDING_MESSAGE):
+
+                # Now ideally, we must never reach this section of elif
+                #
                 bytesLeftToDiscard = self.__remainingLength - self.__bytesDiscardedCounter
+
                 if (bytesLeftToDiscard <= len(self.__data)):
                     bytesToDiscard = bytesLeftToDiscard
                 else: bytesToDiscard = len(self.__data)
                 self.__bytesDiscardedCounter = self.__bytesDiscardedCounter + bytesToDiscard
-                self.__data = self.__data[0:(bytesToDiscard - 1)] 
+                self.__data = self.__data[0:(bytesToDiscard - 1)]
                 if(self.__bytesDiscardedCounter == self.__remainingLength):
                     e = self.__error
                     self.__init()
-                    raise MqttDecoderError(e) 
-            if(self.__state == self.MESSAGE_READY):
+                    raise MqttDecoderError(e)
+
+            elif(self.__state == self.MESSAGE_READY):
                 # returns a tuple of (mqttMessage, dataRemaining)
                 mqttMsg = self.__msgFactory.message(self.__fixedHeader, self.__variableHeader, self.__payload)
                 self.__init()
                 return mqttMsg
-            if(self.__state == self.BAD):
+
+            elif(self.__state == self.BAD):
+
+                # Now ideally, we must never reach this section of elif
+                #
+
                 # do not decode until disconnection.
-                raise MqttFrameError(self.__error)  
-        return None 
-            
+                raise MqttFrameError(self.__error)
+
+
+        return None
+
     def __decodeFixedHeaderFirstByte(self, byteStr):
         byte = ord(byteStr)
         self.__fixedHeader.messageType = (byte & 0xF0)
@@ -1172,6 +1205,9 @@ class MqttDecoder:
         self.__mqttMsg = None
         self.__bytesDiscardedCounter = 0 
         self.__error = 'MqttDecoder: Unrecognized __error'
+
+    def reinit(self):
+        self.__init()
 
 class MqttEncoder:
     def __init__(self):
