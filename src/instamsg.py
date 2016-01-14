@@ -42,7 +42,7 @@ class InstaMsg:
     INSTAMSG_RESULT_HANDLER_TIMEOUT = 10    
     INSTAMSG_MSG_REPLY_HANDLER_TIMEOUT = 10
     # InstaMsg Versions // Update every time when some changes happened in this file.
-    INSTAMSG_VERSION = "15.08.00"
+    INSTAMSG_VERSION = "1.00.00"
     
     def __init__(self, clientId, authKey, connectHandler, disConnectHandler, oneToOneMessageHandler, options={}):
         if(not callable(connectHandler)): raise ValueError('connectHandler should be a callable object.')
@@ -236,7 +236,7 @@ class InstaMsg:
     def __onConnect(self, mqttClient):
         self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]:: Client connected to InstaMsg IOT cloud service.")
         def _resultHandler(result):
-            print "Subscribed to topic %s " % (self.__serverLogging)
+            self.log(INSTAMSG_LOG_LEVEL_INFO,"Subscribed to topic %s " % (self.__serverLogging))
         self.subscribe(self.__serverLogging, 1, self.__enableServerLogging, _resultHandler)
         self.__sendClientMetadata()
         self.__sendClientSessionData()
@@ -267,17 +267,20 @@ class InstaMsg:
                     pass
     
     def __handleMessage(self, mqttMsg):
-        if(mqttMsg.topic == self.__clientId):
-            self.__handlePointToPointMessage(mqttMsg)
-        elif(mqttMsg.topic == self.__filesTopic):
-            self.__handleFileTransferMessage(mqttMsg)
-        elif(mqttMessage.topic() == self.__REBOOT_TOPIC):
-            self.__handleSystemRebootMessage()
-        else:
-            msg = Message(mqttMsg.messageId, mqttMsg.topic, mqttMsg.payload, mqttMsg.fixedHeader.qos, mqttMsg.fixedHeader.dup)
-            msgHandler = self.__msgHandlers.get(mqttMsg.topic)
-            if(msgHandler):
-                msgHandler(msg)
+        try:
+            if(mqttMsg.topic == self.__clientId):
+                self.__handlePointToPointMessage(mqttMsg)
+            elif(mqttMsg.topic == self.__filesTopic):
+                self.__handleFileTransferMessage(mqttMsg)
+            elif(mqttMsg.topic == self.__REBOOT_TOPIC):
+                self.__handleSystemRebootMessage()
+            else:
+                msg = Message(mqttMsg.messageId, mqttMsg.topic, mqttMsg.payload, mqttMsg.fixedHeader.qos, mqttMsg.fixedHeader.dup)
+                msgHandler = self.__msgHandlers.get(mqttMsg.topic)
+                if(msgHandler):
+                    msgHandler(msg)
+        except Exception, e:
+            self.log(INSTAMSG_LOG_LEVEL_ERROR, "Error in handling received message. Error message is : %s " % str(e))
                 
     def __handleFileTransferMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
@@ -679,7 +682,7 @@ class MqttClient:
         publishMsg = self.__mqttMsgFactory.message(fixedHeader, variableHeader, payload)
         encodedMsg = self.__mqttEncoder.encode(publishMsg)
         self.__sendall(encodedMsg)
-        self.__validateResultHandler(resultHandler)
+#        self.__validateResultHandler(resultHandler)
         if(qos == self.MQTT_QOS0 and resultHandler): 
             resultHandler(Result(None, 1))  # immediately return messageId 0 in case of qos 0
         elif (qos > self.MQTT_QOS0 and messageId and resultHandler): 
@@ -752,7 +755,10 @@ class MqttClient:
     def getSignalStrength(self):
         try:
             quality = self.__parseJson(str(at.getSignalQuality()))
-            return (-113 + int((2 * int(quality[0]))))
+            if (size(quality) > 0):
+                return (-113 + int((2 * int(quality[0]))))
+            else:
+                return -1
         except:
             return -1
         
@@ -762,7 +768,6 @@ class MqttClient:
     def __publishNetworkStrengthInfo(self):
         if(self.__signalInfoPublishTimer - time.time() <= 0):
             signalInfo = {'antina_status': at.getAntennaStatus(), 'signal_strength': str(self.getSignalStrength())}
-            print ("publishing signal info : %s" % str(signalInfo))
             self.__signalInfoPublishTimer = self.__signalInfoPublishTimer + self.SIGNALINFO_PERIODIC_INTERVAL
             self.publish(self.__NETWORK_DATA, str(signalInfo), self.MQTT_QOS1, 0)
         
@@ -889,6 +894,7 @@ class MqttClient:
         if(mqttMessage.fixedHeader.qos > self.MQTT_QOS1): 
             if(mqttMessage.messageId not in self.__msgIdInbox):
                 self.__msgIdInbox.append(mqttMessage.messageId)
+         
         if(self.__onMessageCallBack):
             self.__onMessageCallBack(mqttMessage)
         if(self.MQTT_QOS1 == mqttMessage.fixedHeader.qos):
