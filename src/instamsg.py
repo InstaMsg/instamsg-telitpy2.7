@@ -755,7 +755,7 @@ class MqttClient:
     def getSignalStrength(self):
         try:
             quality = self.__parseJson(str(at.getSignalQuality()))
-            if (size(quality) > 0):
+            if (len(quality) > 0):
                 return (-113 + int((2 * int(quality[0]))))
             else:
                 return -1
