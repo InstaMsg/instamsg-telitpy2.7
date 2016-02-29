@@ -4,7 +4,6 @@ import MDM
 import MDM2
 import sys 
 import time
-import thread
 import instamsg
 import posix
     
@@ -30,12 +29,12 @@ INSTAMSG_QOS2 = 2
 
 class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
-    INSTAMSG_KEEP_ALIVE_TIMER = 90
+    INSTAMSG_KEEP_ALIVE_TIMER = 600
     INSTAMSG_RECONNECT_TIMER = 90
-    INSTAMSG_HOST = "device.instamsg.io"
+    INSTAMSG_HOST = "test.instamsg.io"
     INSTAMSG_PORT = 1883
     INSTAMSG_PORT_SSL = 8883
-    INSTAMSG_HTTP_HOST = "platform.instamsg.io"
+    INSTAMSG_HTTP_HOST = "test.instamsg.io"
     INSTAMSG_HTTP_PORT = 80
     INSTAMSG_HTTPS_PORT = 443
     INSTAMSG_API_VERSION = "beta"
@@ -67,7 +66,6 @@ class InstaMsg:
         self.__sendMsgReplyHandlers = {}  # {handlerId:{time:122334,handler:replyHandler, timeout:10, timeOutMsg:"Timed out"}}
         self.__sslEnabled = 0
         self.__initOptions(options)
-        self.__lock = thread.allocate_lock()
         self._broker = None
         if(self.__enableTcp):
             clientIdAndUsername = self.__getClientIdAndUsername(clientId)
@@ -81,7 +79,6 @@ class InstaMsg:
             self.__mqttClient.connect()
         else:
             self.__mqttClient = None
-        thread.start_new_thread(self.__process, ())
         
     def __initOptions(self, options):
         if(self.__options.has_key('enableSocket')):
@@ -107,14 +104,13 @@ class InstaMsg:
             self.__port = self.INSTAMSG_PORT
             self.__httpPort = self.INSTAMSG_HTTP_PORT
             
-    def __process(self):
-        while 1:
-            try:
-                if(self.__mqttClient):
-                    self.__mqttClient.process()
-                    self.__processHandlersTimeout()
-            except Exception, e:
-                self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
+    def process(self):
+        try:
+            if(self.__mqttClient):
+                self.__mqttClient.process()
+                self.__processHandlersTimeout()
+        except Exception, e:
+            self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
                     
     def close(self):
         try:
@@ -126,8 +122,6 @@ class InstaMsg:
             return 1
         except:
             return - 1
-        finally:
-            thread.exit()
     
     def publish(self, topic, msg, qos=INSTAMSG_QOS0, dup=0, resultHandler=None, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
         if(self.__mqttClient and topic):
@@ -244,7 +238,7 @@ class InstaMsg:
         
     def __sendClientSessionData(self):
         ipAddress = at.getGPRSAddress(1)
-        session = {'method':"GPRS", 'ip_address':ipAddress, 'antina_status': at.getAntennaStatus(), 'signal_strength': str(self.__mqttClient.getSignalStrength())}
+        session = {'network_interface':"GPRS", 'ip_address':ipAddress}
         self.publish(self.__SESSION_DATA, str(session), INSTAMSG_QOS1, 0)
     
     def __sendClientMetadata(self):
@@ -280,7 +274,7 @@ class InstaMsg:
                 if(msgHandler):
                     msgHandler(msg)
         except Exception, e:
-            self.log(INSTAMSG_LOG_LEVEL_ERROR, "Error in handling received message. Error message is : %s " % str(e))
+            self.log(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsg]::Error in handling received message. Error message is : %s " % str(e))
                 
     def __handleFileTransferMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
@@ -347,7 +341,7 @@ class InstaMsg:
                 activeScript = at.getActiveScript()
                 if(fileList): 
                     if(activeScript):
-                        fileList['active_script'] = activeScript
+                        fileList['main_script'] = activeScript
                     break
             except Exception, e :
                 if(retry == 0):
@@ -357,7 +351,6 @@ class InstaMsg:
                         raise at.error(str(e))
                     else:
                         raise Exception(str(e))
-                time.sleep(1)
                 continue
         return str(fileList).replace("'", '"')   
     
@@ -365,7 +358,7 @@ class InstaMsg:
         posix.unlink(filename)
         
     def __handleSystemRebootMessage(self):
-        self.log(INSTAMSG_LOG_LEVEL[level], "Rebooting device.") 
+        self.log(INSTAMSG_LOG_LEVEL[level], "[InstaMsg]::Rebooting device.") 
         at.reboot()
         
     def __handlePointToPointMessage(self, mqttMsg):
@@ -568,7 +561,8 @@ class MqttClient:
     MQTT_QOS2 = 2
     # Extra var
     SIGNALINFO_PERIODIC_INTERVAL = 300
-    
+    CONNECT_ACK_TIMEOUT = 300
+    SOCKET_ERROR_COUNT_FOR_REBOOT = 10
 
     def __init__(self, host, port, clientId, options={}):
         if(not clientId):
@@ -609,6 +603,8 @@ class MqttClient:
         self.__NETWORK_DATA_TOPIC = "instamsg/client/signalinfo"
         self.__CPU_INFO_TOPIC = "instamsg/client/cpu"
         self.__signalInfoPublishTimer = time.time()
+        self.__lastConnectTime = time.time()
+        self.__socketErrorCount = 0
         
     def process(self):
         try:
@@ -616,7 +612,7 @@ class MqttClient:
                 self.connect()
                 if(self.__sockInit):
                     self.__receive()
-                    if (self.__connected and (self.__lastPingReqTime + self.keepAliveTimer < time.time())):
+                    if (self.__connected and ((self.__lastPingReqTime + 1.5 * self.keepAliveTimer) < time.time())):
                         if (self.__lastPingRespTime is None):
                             self.disconnect()
                         else: 
@@ -625,8 +621,12 @@ class MqttClient:
                             self.__lastPingRespTime = None
                     if (self.__connected):
                         self.__publishNetworkStrengthInfo()
-                self.__processHandlersTimeout()
-                time.sleep(1)
+            self.__processHandlersTimeout()
+            if (self.__connecting and ((self.__lastConnectTime + self.CONNECT_ACK_TIMEOUT) < time.time())):
+                self.__log(INSTAMSG_LOG_LEVEL_INFO, "[MqttClientError, method = process]::Connect Ack timed out. Reseting connection.")
+                self.__resetSock()
+            if (self.__socketErrorCount > self.SOCKET_ERROR_COUNT_FOR_REBOOT):
+                at.reboot()
         except SocketError, msg:
             self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = process][SocketError]:: %s" % (str(msg)))
@@ -644,14 +644,15 @@ class MqttClient:
                     connectMsg = self.__mqttMsgFactory.message(fixedHeader, self.options, self.options)
                     encodedMsg = self.__mqttEncoder.encode(connectMsg)
                     self.__sendall(encodedMsg)
+                    self.__lastConnectTime = time.time()
         except SocketTimeoutError:
-            self.__connecting = 0
+            self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = connect][SocketTimeoutError]:: Socket timed out")
         except SocketError, msg:
             self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = connect][SocketError]:: %s" % (str(msg)))
         except:
-            self.__connecting = 0
+            self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[MqttClientError, method = connect][Exception]:: %s %s" % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))
     
     def disconnect(self):
@@ -670,7 +671,6 @@ class MqttClient:
     
     def publish(self, topic, payload, qos=MQTT_QOS0, dup=0, resultHandler=None, resultHandlerTimeout=MQTT_RESULT_HANDLER_TIMEOUT, retain=0):
         if(not self.__connected or self.__connecting  or self.__waitingReconnect):
-            self.connect()
             raise MqttClientError("Cannot publish message as not connected.")
         self.__validateTopic(topic)
         self.__validateQos(qos)
@@ -682,13 +682,12 @@ class MqttClient:
         variableHeader = {'messageId': messageId, 'topic': str(topic)}
         publishMsg = self.__mqttMsgFactory.message(fixedHeader, variableHeader, payload)
         encodedMsg = self.__mqttEncoder.encode(publishMsg)
-        self.__sendall(encodedMsg)
-#        self.__validateResultHandler(resultHandler)
-        if(qos == self.MQTT_QOS0 and resultHandler): 
-            resultHandler(Result(None, 1))  # immediately return messageId 0 in case of qos 0
-        elif (qos > self.MQTT_QOS0 and messageId and resultHandler): 
+        if (qos > self.MQTT_QOS0 and messageId and resultHandler): 
             timeOutMsg = 'Publishing message %s to topic %s with qos %d timed out.' % (payload, topic, qos)
             self.__resultHandlers[messageId] = {'time':time.time(), 'timeout': resultHandlerTimeout, 'handler':resultHandler, 'timeOutMsg':timeOutMsg}
+        self.__sendall(encodedMsg)
+        if(qos == self.MQTT_QOS0 and resultHandler): 
+            resultHandler(Result(None, 1))  # immediately return messageId 0 in case of qos 0
         
     def subscribe(self, topic, qos, resultHandler=None, resultHandlerTimeout=MQTT_RESULT_HANDLER_TIMEOUT):
         if(not self.__connected or self.__connecting  or self.__waitingReconnect):
@@ -768,14 +767,14 @@ class MqttClient:
           
     def __publishNetworkStrengthInfo(self):
         if(self.__signalInfoPublishTimer - time.time() <= 0):
-            signalInfo = {'antina_status': at.getAntennaStatus(), 'signal_strength': str(self.getSignalStrength())}
+            signalInfo = {'antenna_status': at.getAntennaStatus(), 'signal_strength': str(self.getSignalStrength())}
             self.__signalInfoPublishTimer = self.__signalInfoPublishTimer + self.SIGNALINFO_PERIODIC_INTERVAL
             self.publish(self.__NETWORK_DATA_TOPIC, str(signalInfo), self.MQTT_QOS1, 0)
             self.__publishCpuAndMemoryInfo()
             
     def __publishCpuAndMemoryInfo(self):
         info = {'cpu_temperature' : str(at.getTemperature()), 'remaining_memory' : str(at.getRemainingMemorySpace())}
-        self.publish(self.__CPU_INFO_TOPIC, str(info), self.MQTT_QOS1, 0)
+#        self.publish(self.__CPU_INFO_TOPIC, str(info), self.MQTT_QOS1, 0)
         
     def __validateTopic(self, topic):
         if(topic):
@@ -811,7 +810,9 @@ class MqttClient:
         try:
             if(data):
                 self.__sock.sendall(data)
+                self.__socketErrorCount = 0
         except SocketError, msg:
+            self.__socketErrorCount = self.__socketErrorCount + 1
             self.__resetSock()
             raise SocketError(str("Socket error in send: %s. Connection reset." % (str(msg))))
             
@@ -824,6 +825,7 @@ class MqttClient:
             else:
                 mqttMsg = None
             if (mqttMsg):
+                self.__socketErrorCount = 0
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Received message:%s' % mqttMsg.toString())
                 self.__handleMqttMessage(mqttMsg) 
         except MqttDecoderError, msg:
@@ -831,6 +833,7 @@ class MqttClient:
         except SocketTimeoutError:
             pass
         except (MqttFrameError, SocketError), msg:
+            self.__socketErrorCount = self.__socketErrorCount + 1
             self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
             
@@ -846,7 +849,7 @@ class MqttClient:
         elif msgType == self.UNSUBACK:
             self.__handleUnSubAck(mqttMessage)
         elif msgType == self.PUBACK:
-            self.__sendPubAckMsg(mqttMessage)
+            self.__handlePubAckMsg(mqttMessage)
         elif msgType == self.PUBREC:
             self.__handlePubRecMsg(mqttMessage)
         elif msgType == self.PUBCOMP:
@@ -860,20 +863,27 @@ class MqttClient:
         else:
             raise MqttEncoderError('MqttEncoder: Unknown message type.') 
     
+    def __getResultHandler(self, mqttMessage):
+        resultHandler = None
+        resultHandlerDict = self.__resultHandlers.get(mqttMessage.messageId)
+        if(resultHandlerDict):
+            resultHandler = resultHandlerDict.get('handler')
+        return resultHandler
+    
     def __handleSubAck(self, mqttMessage):
-        resultHandler = self.__resultHandlers.get(mqttMessage.messageId).get('handler')
+        resultHandler = self.__getResultHandler(mqttMessage)
         if(resultHandler):
             resultHandler(Result(mqttMessage, 1))
             del self.__resultHandlers[mqttMessage.messageId]
     
     def __handleUnSubAck(self, mqttMessage):
-        resultHandler = self.__resultHandlers.get(mqttMessage.messageId).get('handler')
+        resultHandler = self.__getResultHandler(mqttMessage)
         if(resultHandler):
             resultHandler(Result(mqttMessage, 1))
             del self.__resultHandlers[mqttMessage.messageId]
     
     def __onPublish(self, mqttMessage):
-        resultHandler = self.__resultHandlers.get(mqttMessage.messageId).get('handler')
+        resultHandler = self.__getResultHandler(mqttMessage)
         if(resultHandler):
             resultHandler(Result(mqttMessage, 1))
             del self.__resultHandlers[mqttMessage.messageId]
@@ -912,6 +922,14 @@ class MqttClient:
         pubAckMsg = self.__mqttMsgFactory.message(fixedHeader, variableHeader)
         encodedMsg = self.__mqttEncoder.encode(pubAckMsg)
         self.__sendall(encodedMsg)
+        
+    def __handlePubAckMsg(self, mqttMessage):
+        if(mqttMessage.messageId in self.__resultHandlers):
+            resultHandler = self.__resultHandlers[mqttMessage.messageId]['handler']
+            if(resultHandler):
+                resultHandler(Result(mqttMessage.messageId, 1, None))
+                resultHandler = None
+                del self.__resultHandlers[key]
             
     def __handlePubRelMsg(self, mqttMessage):
         fixedHeader = MqttFixedHeader(self.PUBCOMP)
@@ -1513,7 +1531,7 @@ class MqttMsgFactory:
             return MqttConnAckMsg(fixedHeader, variableHeader)
         elif fixedHeader.messageType == MqttClient.PUBLISH: 
             return MqttPublishMsg(fixedHeader, variableHeader, payload)
-        elif fixedHeader.messageType == MqttClient.SUBACK: 
+        elif fixedHeader.messageType == MqttClient.PUBACK: 
             return MqttPubAckMsg(fixedHeader, variableHeader)
         elif fixedHeader.messageType == MqttClient.PUBREC: 
             return MqttPubRecMsg(fixedHeader, variableHeader)
@@ -1964,6 +1982,7 @@ class Socket:
         try:
             self.__at.initGPRSConnection()
             self.addr = addr
+            self.close()#Hack for cleaning zombie sockets not closed
             self.__at.connectSocket(self._sockno, addr, timeout=self._timeout + 3)
             self.connected = 1
         except(SocketMaxCountError, SocketConfigError), msg:
@@ -2093,6 +2112,7 @@ class SslSocket(Socket):
         try:
             self.__at.initGPRSConnection()
             self.addr = addr
+            self.close()#Hack for cleaning zombie sockets not closed
             self.__at.connectSslSocket(self._sockno, addr, timeout=self._timeout + 3)
             self.connected = 1
         except(SocketMaxCountError, SocketConfigError), msg:
@@ -2402,14 +2422,10 @@ class At:
             self.__mdm = MDM2
         else:
             self.__mdm = MDM
-        self.__lock = thread.allocate_lock()
-#        self.sendCmd('ATE1')
     
-    def sendCmd(self, cmd, timeOut=2, expected='\r\nOK\r\n', addCR=1, acquireLock=1):
+    def sendCmd(self, cmd, timeOut=2, expected='\r\nOK\r\n', addCR=1):
         try:
             if (timeOut <= 0): timeOut = 2
-            if(acquireLock and not self.__lock.acquire(0)):
-                raise self.timeout("Unable to acquire lock.")
             #Do not use stamements in this try block 
             #that call sendCmd e.g. print that uses logger
             #As it will try to again take a lock on thread already 
@@ -2420,8 +2436,7 @@ class At:
                 else:
                     r = self.__mdm.send(cmd, 5)
             finally:
-                if(acquireLock):
-                    self.__lock.release()   
+                pass
             if (r < 0):
                 raise self.timeout('Send "%s" timed out.' % cmd)
             timer = time.time() + timeOut
@@ -2557,10 +2572,13 @@ class At:
                 fileinfo = r.replace(expectedResponse, '')
                 if(fileinfo.find('free bytes') == 0):
                     fileinfo = fileinfo.replace('free bytes', 'free_bytes').split(':')
+                if(fileinfo.find('decoded_seed') == 0):
+                    fileinfo = fileinfo.replace('decoded_seed', '')
                 else:
                     fileinfo = fileinfo.replace('"', '').split(',')
                 if(len(fileinfo) == 2):
-                    fileList[fileinfo[0]] = int(fileinfo[1])
+                    fileList['name'] = fileList[fileinfo[0]] 
+                    fileList['size'] = int(fileinfo[1])
         return fileList
     
     def deleteFile(self, filename):
@@ -2877,13 +2895,11 @@ class At:
         while(data):
             partData = data[:1500]
             sendDataSize = len(partData)
-            if(not self.__lock.acquire(0)):
-                raise self.timeout("Unable to acquire lock.")
             try:
-                self.sendCmd('AT#SSENDEXT=%d,%d' % (connId, sendDataSize), 1, '', acquireLock=0)
-                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0, acquireLock=0)
-            finally:
-                self.__lock.release()
+                self.sendCmd('AT#SSENDEXT=%d,%d' % (connId, sendDataSize), 1, '')
+                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0)
+            except:
+                pass    
             data = data[sendDataSize:]
         return bytestosend
 
@@ -2892,13 +2908,11 @@ class At:
         while(data):
             partData = data[:1500]
             sendDataSize = len(partData)
-            if(not self.__lock.acquire(0)):
-                raise self.timeout("Unable to acquire lock.")
             try:
-                self.sendCmd('AT#SSLSENDEXT=%d,%d' % (connId, sendDataSize), 1, '', acquireLock=0)
-                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0, acquireLock=0)
-            finally:
-                self.__lock.release()
+                self.sendCmd('AT#SSLSENDEXT=%d,%d' % (connId, sendDataSize), 1, '')
+                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0)
+            except:
+                pass
             data = data[sendDataSize:]
         return bytestosend
     
