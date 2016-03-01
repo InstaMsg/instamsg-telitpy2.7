@@ -31,10 +31,10 @@ class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
     INSTAMSG_KEEP_ALIVE_TIMER = 600
     INSTAMSG_RECONNECT_TIMER = 90
-    INSTAMSG_HOST = "test.instamsg.io"
+    INSTAMSG_HOST = "device.instamsg.io"
     INSTAMSG_PORT = 1883
     INSTAMSG_PORT_SSL = 8883
-    INSTAMSG_HTTP_HOST = "test.instamsg.io"
+    INSTAMSG_HTTP_HOST = "platform.instamsg.io"
     INSTAMSG_HTTP_PORT = 80
     INSTAMSG_HTTPS_PORT = 443
     INSTAMSG_API_VERSION = "beta"
@@ -651,6 +651,9 @@ class MqttClient:
         except SocketError, msg:
             self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = connect][SocketError]:: %s" % (str(msg)))
+        except SocketConfigError, msg:
+            self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = connect][SocketConfigError]:: %s. Rebooting..." % (str(msg)))
+            at.reboot()
         except:
             self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[MqttClientError, method = connect][Exception]:: %s %s" % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))
@@ -812,7 +815,6 @@ class MqttClient:
                 self.__sock.sendall(data)
                 self.__socketErrorCount = 0
         except SocketError, msg:
-            self.__socketErrorCount = self.__socketErrorCount + 1
             self.__resetSock()
             raise SocketError(str("Socket error in send: %s. Connection reset." % (str(msg))))
             
@@ -833,7 +835,6 @@ class MqttClient:
         except SocketTimeoutError:
             pass
         except (MqttFrameError, SocketError), msg:
-            self.__socketErrorCount = self.__socketErrorCount + 1
             self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
             
@@ -947,6 +948,7 @@ class MqttClient:
         self.__sendall(encodedMsg)
     
     def __resetSock(self):
+        self.__socketErrorCount = self.__socketErrorCount + 1
         if(self.__sockInit):
             self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Resetting connection socket...')
             self.__closeSocket()
@@ -1961,6 +1963,7 @@ class Socket:
         sockStates = self.__at.socketStatus()
         for sockState in sockStates:
             ss = sockState.split(',')
+         #   print "Socket: %s, State: %s)"%(ss[0], ss[1])
             if ss[1] == '0':
                 return int(ss[0])
         return None
@@ -1976,7 +1979,7 @@ class Socket:
             raise SocketConfigError('Unable to configure socket - %s' % str(e))
         
     def __socketStatus(self):
-        return int(at2.socketStatus(self._sockno).split(',')[1])
+        return int(self.__at.socketStatus(self._sockno).split(',')[1])
     
     def connect(self, addr):
         try:
@@ -2060,7 +2063,7 @@ class Socket:
 ####Secure(ssl) Socket class ###############################################################################
 class SslSocket(Socket):
     default_keep_alive = 0
-    maxconn = 6
+    maxconn = 1
     connected = 0
     accepting = 0
     closing = 0
@@ -2423,13 +2426,9 @@ class At:
         else:
             self.__mdm = MDM
     
-    def sendCmd(self, cmd, timeOut=2, expected='\r\nOK\r\n', addCR=1):
+    def sendCmd(self, cmd, timeOut=1, expected='\r\nOK\r\n', addCR=1):
         try:
-            if (timeOut <= 0): timeOut = 2
-            #Do not use stamements in this try block 
-            #that call sendCmd e.g. print that uses logger
-            #As it will try to again take a lock on thread already 
-            #locked by it. There is no support RLock so retrying lock will fail
+            if (timeOut <= 0): timeOut = 1
             try:
                 if (addCR == 1):
                     r = self.__mdm.send(cmd + '\r', 5)
