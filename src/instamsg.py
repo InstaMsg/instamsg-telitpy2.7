@@ -31,10 +31,10 @@ class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
     INSTAMSG_KEEP_ALIVE_TIMER = 600
     INSTAMSG_RECONNECT_TIMER = 90
-    INSTAMSG_HOST = "device.instamsg.io"
+    INSTAMSG_HOST = "test.instamsg.io"
     INSTAMSG_PORT = 1883
     INSTAMSG_PORT_SSL = 8883
-    INSTAMSG_HTTP_HOST = "platform.instamsg.io"
+    INSTAMSG_HTTP_HOST = "test.instamsg.io"
     INSTAMSG_HTTP_PORT = 80
     INSTAMSG_HTTPS_PORT = 443
     INSTAMSG_API_VERSION = "beta"
@@ -628,8 +628,8 @@ class MqttClient:
             if (self.__socketErrorCount > self.SOCKET_ERROR_COUNT_FOR_REBOOT):
                 at.reboot()
         except SocketError, msg:
-            self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = process][SocketError]:: %s" % (str(msg)))
+            self.__resetSock()
         except:
             self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[MqttClientError, method = process][Exception]:: %s %s" % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))
     
@@ -646,18 +646,18 @@ class MqttClient:
                     self.__sendall(encodedMsg)
                     self.__lastConnectTime = time.time()
         except SocketTimeoutError:
-            self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = connect][SocketTimeoutError]:: Socket timed out")
-        except SocketError, msg:
             self.__resetSock()
+        except SocketError, msg:
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = connect][SocketError]:: %s" % (str(msg)))
+            self.__resetSock()
         except SocketConfigError, msg:
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = connect][SocketConfigError]:: %s. Rebooting..." % (str(msg)))
             at.reboot()
         except:
-            self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[MqttClientError, method = connect][Exception]:: %s %s" % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))
-    
+            self.__resetSock()
+            
     def disconnect(self):
         try:
             try:
@@ -832,11 +832,12 @@ class MqttClient:
                 self.__handleMqttMessage(mqttMsg) 
         except MqttDecoderError, msg:
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
+            self.__resetSock()
         except SocketTimeoutError:
             pass
         except (MqttFrameError, SocketError), msg:
-            self.__resetSock()
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
+            self.__resetSock()
             
     def __handleMqttMessage(self, mqttMessage):
         self.__lastPingRespTime = time.time()
@@ -859,7 +860,7 @@ class MqttClient:
             self.__handlePubRelMsg(mqttMessage)
         elif msgType == self.PINGRESP:
             self.__lastPingRespTime = time.time()
-        elif msgType in [self.CONNECT, self.SUBSCRIBE, self.UNSUBSCRIBE, self.PINGREQ]:
+        elif msgType in [self.CONNECT, self.SUBSCRIBE, self.UNSUBSCRIBE, self.PINGREQ, self.DISCONNECT]:
             pass  # Client will not receive these messages
         else:
             raise MqttEncoderError('MqttEncoder: Unknown message type.') 
@@ -930,7 +931,7 @@ class MqttClient:
             if(resultHandler):
                 resultHandler(Result(mqttMessage.messageId, 1, None))
                 resultHandler = None
-                del self.__resultHandlers[key]
+                del self.__resultHandlers[mqttMessage.messageId]
             
     def __handlePubRelMsg(self, mqttMessage):
         fixedHeader = MqttFixedHeader(self.PUBCOMP)
@@ -938,7 +939,8 @@ class MqttClient:
         pubComMsg = self.__mqttMsgFactory.message(fixedHeader, variableHeader)
         encodedMsg = self.__mqttEncoder.encode(pubComMsg)
         self.__sendall(encodedMsg)
-        self.__msgIdInbox.remove(mqttMessage.messageId)
+        if(self.__msgIdInbox.__contains__(mqttMessage.messageId)):
+            self.__msgIdInbox.remove(mqttMessage.messageId)
     
     def __handlePubRecMsg(self, mqttMessage):
         fixedHeader = MqttFixedHeader(self.PUBREL, 1)
@@ -974,15 +976,11 @@ class MqttClient:
             if(self.__sock is not None):
                 self.__closeSocket()
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Opening socket to %s:%s' % (self.host, str(self.port)))
-            if(self.sslEnabled):
-                self.__sock = SslSocket(self.MQTT_SOCKET_TIMEOUT, at)
-            else:
-                self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at)
+            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at, self.sslEnabled)
             self.__sock.connect((self.host, self.port))
             self.__sockInit = 1
             self.__waitingReconnect = 0
             self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Socket opened to %s:%s' % (self.host, str(self.port)))   
-            
     
     def __closeSocket(self):
         try:
@@ -990,8 +988,9 @@ class MqttClient:
             if(self.__sock):
                 self.__sock.close()
                 self.__sock = None
+                self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Socket closed.')
         except:
-            pass 
+            self.__log(INSTAMSG_LOG_LEVEL_ERROR, '[MqttClient]:: Unexpected Error while closing socket...') 
     
     def __generateMessageId(self): 
         if self.__messageId == self.MQTT_MAX_INT:
@@ -1098,7 +1097,7 @@ class MqttDecoder:
         self.__variableHeader['topic'] = None
         
 
-    def __decodeVariableHeader(self):  
+    def __decodeVariableHeader(self):
         if self.__fixedHeader.messageType in [MqttClient.CONNECT, MqttClient.SUBSCRIBE, MqttClient.UNSUBSCRIBE, MqttClient.PINGREQ]:
             self.__state = self.DISCARDING_MESSAGE
             self.__error = ('MqttDecoder: Client cannot receive CONNECT, SUBSCRIBE, UNSUBSCRIBE, PINGREQ message type.') 
@@ -1949,7 +1948,7 @@ class Socket:
     socketStates[4] = "Socket listening."
     socketStates[5] = "Socket with an incoming connection. Waiting for the accept or shutdown command."
     
-    def __init__(self, timeout, at, keepAlive=default_keep_alive):
+    def __init__(self, timeout, at, keepAlive=default_keep_alive, ssl=0):
         if(keepAlive < 0 or keepAlive > 240): raise SocketError("Keep alive should be between 0-240")
         self._timeout = timeout or 10  # sec
         self._keepAlive = keepAlive 
@@ -1957,36 +1956,55 @@ class Socket:
         self._sockno = None
         self.connected = 0
         self.__at = at
+        self.__ssl = ssl
+        if(ssl):
+            self.maxconn = 1
+            self._sockno = 1
+            self._cipherSuite = 0
+            self._authMode = 0
+            self.__enableSslSocket()
+            self.__configureSslSocketSecurity()
         self.__configureSocket()
             
     def __get_socketno(self):
-        sockStates = self.__at.socketStatus()
+        sockStates = self.__at.socketStatus(ssl=self.__ssl)
         for sockState in sockStates:
             ss = sockState.split(',')
-         #   print "Socket: %s, State: %s)"%(ss[0], ss[1])
             if ss[1] == '0':
                 return int(ss[0])
         return None
+    
+    def __enableSslSocket(self):
+        try:
+            self.__at.enableSslSocket(connId=self._sockno, enableSsl=1)
+        except:
+            raise SocketConfigError('Unable to enable ssl socket %d' % self._sockno)
+        
+    def __configureSslSocketSecurity(self):
+        try:
+            self.__at.configureSslSocketSecurity(connId=self._sockno, cipherSuite=self._cipherSuite, authMode=self._authMode)
+        except:
+            raise SocketConfigError('Unable to configure ssl socket security %d' % self._sockno)
     
     def __configureSocket(self):
         try:
             self._sockno = self.__get_socketno()
             if(self._sockno):
-                self.__at.configureSocket(connId=self._sockno, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp)
+                self.__at.configureSocket(connId=self._sockno, ssl=self.__ssl, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp)
             else:
                 raise SocketMaxCountError('All sockets in use. Total number of socket cannot exceed %d.' % self.maxconn)
         except Exception, e:
             raise SocketConfigError('Unable to configure socket - %s' % str(e))
         
     def __socketStatus(self):
-        return int(self.__at.socketStatus(self._sockno).split(',')[1])
+        return int(self.__at.socketStatus(self.__ssl, self._sockno).split(',')[1])
     
     def connect(self, addr):
         try:
             self.__at.initGPRSConnection()
             self.addr = addr
             self.close()#Hack for cleaning zombie sockets not closed
-            self.__at.connectSocket(self._sockno, addr, timeout=self._timeout + 3)
+            self.__at.connectSocket(self._sockno, addr, ssl=self.__ssl, timeout=self._timeout + 3)
             self.connected = 1
         except(SocketMaxCountError, SocketConfigError), msg:
             raise SocketError(str(msg))
@@ -1994,12 +2012,12 @@ class Socket:
             raise SocketError('Unable to connect to remote host %s' % str(addr))
         
     def listen(self, addr):
-# Telit module only allows one connection at a time on a listening socket.
+        # Telit module only allows one connection at a time on a listening socket.
         try:
             self.__at.initGPRSConnection()
             self.addr = addr
             self._listenAutoRsp = 1
-            self.__configureSocket()
+            self.__configureSocket(self._sockno, ssl=self.__ssl)
             self.__at.socketListen(self._sockno, 1, addr(1), timeout=self._timeout + 3)
             self.connected = 1
             self.accepting = 1
@@ -2015,23 +2033,34 @@ class Socket:
             raise SocketError('Error in connection accept.')  
                      
     def close(self):
-        try:
-            if(self.__socketStatus() == 0):return
-            if(self.accepting):
-                self.__at.socketListen(self._sockno, 0, self.addr[1], self._timeout) 
-                self.accepting = 0   
-            self.__at.closeSocket(self._sockno)
-            self.connected = 0
-        except:
-            raise SocketError('Unable to close socket %d' % self._sockno)
+        tries = 3
+        while(tries > 0):
+            try:
+                tries = tries - 1
+                socketStatus = self.__socketStatus()
+                if(socketStatus == 0):return
+                if(self.accepting):
+                    self.__at.socketListen(self._sockno, 0, self.addr[1], self._timeout) 
+                    self.accepting = 0   
+                try:
+                    #read data before closing. If status 3 closing socket will raise error.
+                    self.__at.socketRecv(self._sockno, 1500, self._timeout + 3, self.__ssl)
+                except:
+                    pass
+                self.__at.closeSocket(self._sockno, self._timeout, self.__ssl)
+                self.connected = 0
+                break
+            except:
+                if(tries == 0):
+                    raise SocketError('Unable to close socket %d' % self._sockno)
   
     def recv(self, bufsize):
         try:
             ss = self.__socketStatus()
-            if(not ss):raise SocketError(self.socketStates[ss])
+            if(ss == 0):raise SocketError(self.socketStates[ss])
             if(ss == 3):
                 if(bufsize > 1500 or bufsize < 0):bufsize = 1500
-                return self.__at.socketRecv(self._sockno, bufsize, self._timeout + 3)
+                return self.__at.socketRecv(self._sockno, bufsize, self._timeout + 3, self.__ssl)
             else:
                 return ''
         except self.__at.timeout:
@@ -2042,9 +2071,9 @@ class Socket:
     def send(self, data):
         try:
             ss = self.__socketStatus()
-            if(not ss):raise SocketError(self.socketStates[ss])
+            if(ss == 0):raise SocketError(self.socketStates[ss])
             data = data[:1500]
-            return self.__at.socketSend(self._sockno, data, len(data), self._timeout + 3, 0)
+            return self.__at.socketSend(self._sockno, data, len(data), self._timeout + 3,self.__ssl, 0)
         except self.__at.timeout:
             raise SocketTimeoutError('Timed out.')
         except Exception, e:
@@ -2053,121 +2082,13 @@ class Socket:
     def sendall(self, data):
         try:
             ss = self.__socketStatus()
-            if(not ss):raise SocketError(self.socketStates[ss])
-            return self.__at.socketSend(self._sockno, data, len(data), self._timeout + 3, 0)
+            if(ss == 0):raise SocketError(self.socketStates[ss])
+            return self.__at.socketSend(self._sockno, data, len(data), self._timeout + 3, self.__ssl, 0)
         except self.__at.timeout:
             raise SocketTimeoutError('Timed out.')
         except Exception, e:
             raise SocketError('Error in sendall - %s' % str(e)) 
 
-####Secure(ssl) Socket class ###############################################################################
-class SslSocket(Socket):
-    default_keep_alive = 0
-    maxconn = 1
-    connected = 0
-    accepting = 0
-    closing = 0
-    addr = None
-    socketStates = {}
-    socketStates[0] = "Socket Closed."
-    socketStates[1] = "Socket with an active data transfer connection."
-    socketStates[2] = "Socket suspended."
-    socketStates[3] = "Socket suspended with pending data."
-    socketStates[4] = "Socket listening."
-    socketStates[5] = "Socket with an incoming connection. Waiting for the accept or shutdown command."
-    
-    def __init__(self, timeout, at, keepAlive=default_keep_alive):
-        if(keepAlive < 0 or keepAlive > 240): raise SocketError("Keep alive should be between 0-240")
-        self._timeout = timeout or 10  # sec
-        self._keepAlive = keepAlive 
-        self._listenAutoRsp = 0
-        self._sockno = 1
-        self.connected = 0
-        self.__at = at
-        self._cipherSuite = 0
-        self._authMode = 0
-        self.__enableSslSocket()
-        self.__configureSslSocketSecurity()
-        self.__configureSocket()
-
-    def __enableSslSocket(self):
-        try:
-            self.__at.enableSslSocket(connId=self._sockno, enableSsl=1)
-        except:
-            raise SocketConfigError('Unable to enable ssl socket %d' % self._sockno)
-        
-    def __configureSslSocketSecurity(self):
-        try:
-            self.__at.configureSslSocketSecurity(connId=self._sockno, cipherSuite=self._cipherSuite, authMode=self._authMode)
-        except:
-            raise SocketConfigError('Unable to configure ssl socket security %d' % self._sockno)
-        
-    def __configureSocket(self):
-        try:
-            self.__at.configureSslSocket(connId=self._sockno, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp)
-        except:
-            raise SocketConfigError('Unable to configure socket %d' % self._sockno)
-        
-    def __socketStatus(self):
-        return int(self.__at.sslSocketStatus(self._sockno).split(',')[1])
-    
-    def connect(self, addr):
-        try:
-            self.__at.initGPRSConnection()
-            self.addr = addr
-            self.close()#Hack for cleaning zombie sockets not closed
-            self.__at.connectSslSocket(self._sockno, addr, timeout=self._timeout + 3)
-            self.connected = 1
-        except(SocketMaxCountError, SocketConfigError), msg:
-            raise SocketError(str(msg))
-        except:
-            raise SocketError('Unable to connect to remote host %s' % str(addr))
-        
-    def close(self):
-        try:
-            if(self.__socketStatus() == 0):return
-            if(self.accepting):
-                self.__at.socketListen(self._sockno, 0, self.addr[1], self._timeout) 
-                self.accepting = 0   
-            self.__at.closeSslSocket(self._sockno)
-            self.connected = 0
-        except:
-            raise SocketError('Unable to close socket %d' % self._sockno)
-  
-    def recv(self, bufsize):
-        try:
-            ss = self.__socketStatus()
-            if(not ss):raise SocketError(self.socketStates[ss])
-            if(ss == 2):
-                if(bufsize > 1500 or bufsize < 0):bufsize = 1500
-                return self.__at.sslSocketRecv(self._sockno, bufsize, self._timeout + 3)
-            else:
-                return ''
-        except self.__at.timeout:
-            raise SocketTimeoutError('Timed out.')
-        except Exception, e:
-            raise SocketError('Error in recv data - %s' % str(e))
-
-    def send(self, data):
-        try:
-            ss = self.__socketStatus()
-            if(not ss):raise SocketError(self.socketStates[ss])
-            data = data[:1500]
-            return self.__at.sslSocketSend(self._sockno, data, len(data), self._timeout + 3, 0)
-        except self.__at.timeout:
-            raise SocketTimeoutError('Timed out.')
-        except:
-            raise SocketError('Error in send data.')
-        
-    def sendall(self, data):
-        try:
-            ss = self.__socketStatus()
-            if(not ss):raise SocketError(self.socketStates[ss])
-            return self.__at.sslSocketSend(self._sockno, data, len(data), self._timeout + 3, 0)
-        except self.__at.timeout:
-            raise SocketTimeoutError('Timed out.')
-        except Exception, e:
-            raise SocketError('Error in sendall - %s' % str(e)) 
 
 #####Time##################################################################################  
 class TimeHelper:
@@ -2834,13 +2755,7 @@ class At:
                 res = r.split(' ')
                 return res[3]
         return ''
-         
-    def configureSocket(self, connId, cid=1, pktSz=512, maxTo=0, connTo=600, txTo=50, keepAlive=0, listenAutoRsp=0):
-    # connId(1-6),cid(0-5),pktSz(0-1500),maxTo(0-65535),connTo(10-1200),txTo(0-255)
-    # keepAlive(0 – 240)min
-        self.sendCmd('AT#SCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo))
-        self.sendCmd('AT#SCFGEXT= %d,0,0,%d,%d' % (connId, keepAlive, listenAutoRsp))
-        
+      
     def enableSslSocket(self, connId=1, enableSsl=1):
         resp = self.sendCmd('AT#SSLEN?')
         if(resp.find('#SSLEN: 1,0') >= 0): 
@@ -2849,95 +2764,84 @@ class At:
     def configureSslSocketSecurity(self, connId=1, cipherSuite=0, authMode=0):
         if (self.sendCmd('AT#SSLS=1').find('#SSLEN: 1,1') >= 0):
             self.sendCmd('AT#SSLSECCFG=%d,%d,%d' % (connId, cipherSuite, authMode))
-           
-    def configureSslSocket(self, connId=1, cid=1, pktSz=512, maxTo=0, connTo=600, txTo=50, keepAlive=0, listenAutoRsp=0):
-    # connId(1-6),cid(0-5),pktSz(0-1500),maxTo(0-65535),connTo(10-5000),txTo(0-255)
-    # keepAlive(0 – 240)min
-        if (self.sendCmd('AT#SSLS=1').find('#SSLEN: 1,1') >= 0):
-            self.sendCmd('AT#SSLCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo))
-        #self.sendCmd('AT#SSLCFGEXT= %d,0,0,%d,%d' % (connId, keepAlive, listenAutoRsp))
-            
-    def connectSocket(self, connId, addr, proto=0, closureType=0, IPort=0, timeout=60):
-        connMode = 1  # always connect in command mode
-        self.sendCmd('AT#SD=%d,%d,%d,"%s",%d,%d,%d' % (connId, proto, addr[1], addr[0], closureType, IPort, connMode), timeout)
  
-    def connectSslSocket(self, connId, addr, proto=0, closureType=0, mode=0, timeout=120):
-        connMode = 1  # always connect in command mode
-        self.sendCmd('AT#SSLD=%d,%d,"%s",%d,%d' % (connId, addr[1], addr[0], closureType, connMode), timeout)
-    
-    def closeSocket(self, connId, timeout):
-        self.sendCmd('AT#SH=%d' % connId, timeout)
+    def configureSocket(self, connId, ssl=0, cid=1, pktSz=512, maxTo=0, connTo=600, txTo=50, keepAlive=0, listenAutoRsp=0):
+    # connId(1-6),cid(0-5),pktSz(0-1500),maxTo(0-65535),connTo(10-1200),txTo(0-255)
+    # keepAlive(0 – 240)min
+        if(ssl):
+            if (self.sendCmd('AT#SSLS=1').find('#SSLEN: 1,1') >= 0):
+                self.sendCmd('AT#SSLCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo))
+            #self.sendCmd('AT#SSLCFGEXT= %d,0,0,%d,%d' % (connId, keepAlive, listenAutoRsp))
+        else:
+            self.sendCmd('AT#SCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo))
+            self.sendCmd('AT#SCFGEXT= %d,0,0,%d,%d' % (connId, keepAlive, listenAutoRsp))
         
-    def closeSslSocket(self, connId, timeout):
-        self.sendCmd('AT#SSLH=%d' % connId, timeout)
+    def connectSocket(self, connId, addr, ssl=0, proto=0, closureType=0, IPort=0, timeout=60):
+        connMode = 1  # always connect in command mode
+        if(ssl):
+            self.sendCmd('AT#SSLD=%d,%d,"%s",%d,%d' % (connId, addr[1], addr[0], closureType, connMode), timeout)
+        else:
+            self.sendCmd('AT#SD=%d,%d,%d,"%s",%d,%d,%d' % (connId, proto, addr[1], addr[0], closureType, IPort, connMode), timeout)
+        
     
-    def socketRecv(self, connId, maxByte, timeout):
-        resp = self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout).strip('\r\nOK\r\n').split('\r\n')
-        i, expectedResponse = 0, "#SRECV: %d" % connId
+    def closeSocket(self, connId, timeout, ssl=0):
+        if(ssl):
+            self.sendCmd('AT#SSLH=%d' % connId, timeout)
+        else:
+            self.sendCmd('AT#SH=%d' % connId, timeout)
+        
+    def socketRecv(self, connId, maxByte, timeout, ssl=0):
+        if(ssl):
+            resp = self.sendCmd('AT#SSLRECV=%s,%s' % (str(connId), str(maxByte)), timeout).strip('\r\nOK\r\n').split('\r\n')
+            i, expectedResponse = 0, "#SSLRECV:"
+        else:
+            resp = self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout).strip('\r\nOK\r\n').split('\r\n')
+            i, expectedResponse = 0, "#SRECV: %d" % connId
         for r in resp:
             i = i + 1
             if(r.find(expectedResponse) == 0):
                 break
         return '\r\n'.join(resp[i:len(resp)])
     
-    def sslSocketRecv(self, connId, maxByte, timeout):
-        resp = self.sendCmd('AT#SSLRECV=%s,%s' % (str(connId), str(maxByte)), timeout).strip('\r\nOK\r\n').split('\r\n')
-        i, expectedResponse = 0, "#SSLRECV:" 
-        for r in resp:
-            i = i + 1
-            if(r.find(expectedResponse) == 0):
-                break
-        return '\r\n'.join(resp[i:len(resp)])
-    
-    def socketSend(self, connId, data, bytestosend, timeout, multiPart=0):
+    def socketSend(self, connId, data, bytestosend, timeout, ssl=0, multiPart=0):
     # bytestosend(1-1500)
         while(data):
             partData = data[:1500]
             sendDataSize = len(partData)
             try:
-                self.sendCmd('AT#SSENDEXT=%d,%d' % (connId, sendDataSize), 1, '')
+                if(ssl):
+                    self.sendCmd('AT#SSLSENDEXT=%d,%d' % (connId, sendDataSize), 1, '')
+                else:
+                    self.sendCmd('AT#SSENDEXT=%d,%d' % (connId, sendDataSize), 1, '')
                 self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0)
             except:
                 pass    
             data = data[sendDataSize:]
         return bytestosend
 
-    def sslSocketSend(self, connId, data, bytestosend, timeout, multiPart=0):
-    # bytestosend(1-1500)
-        while(data):
-            partData = data[:1500]
-            sendDataSize = len(partData)
-            try:
-                self.sendCmd('AT#SSLSENDEXT=%d,%d' % (connId, sendDataSize), 1, '')
-                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0)
-            except:
-                pass
-            data = data[sendDataSize:]
-        return bytestosend
-    
-    def socketStatus(self, connId=None):
+    def socketStatus(self, ssl=0, connId=None):
         cmd = self.sendCmd('AT#SS')
-        if(connId):
-            return cmd.split('\r\n')[connId].replace('#SS: ', '')
+        if(ssl):
+            if(connId):
+                return self.sendCmd('AT#SSLS=1').split('\r\n')[connId].replace('#SSLS: ', '')
+            else:
+                return self.sendCmd('AT#SSLS=1').replace('#SSLS: ', '').split('\r\n')[1:7]            
         else:
-            return cmd.replace('#SS: ', '').split('\r\n')[1:6]
-    
-    def sslSocketStatus(self, connId=None):
-        if(connId):
-            return self.sendCmd('AT#SSLS=1').split('\r\n')[connId].replace('#SSLS: ', '')
-        else:
-            return self.sendCmd('AT#SSLS=1').replace('#SSLS: ', '').split('\r\n')[1:6]
+            if(connId):
+                return cmd.split('\r\n')[connId].replace('#SS: ', '')
+            else:
+                return cmd.replace('#SS: ', '').split('\r\n')[1:7]
     
     def suspendSocket(self):   
         self.sendCmd('+++')
         MOD.sleep(20)
     
-    def resumeSocket(self, connId):
-        self.sendCmd('AT#SO=' % connId)
+    def resumeSocket(self, connId,ssl=0):
+        if(ssl):
+            self.sendCmd('AT#SSLO=' % connId)
+        else:
+            self.sendCmd('AT#SO=' % connId)
         
-    def resumeSslSocket(self, connId):
-        self.sendCmd('AT#SSLO=' % connId)
-    
     def socketInfo(self, connId):
         return self.sendCmd('AT#SI=' % connId).split('\r\n')[1].replace('#SI: ', '').split(',')
     
