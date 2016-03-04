@@ -563,6 +563,8 @@ class MqttClient:
     SIGNALINFO_PERIODIC_INTERVAL = 300
     CONNECT_ACK_TIMEOUT = 300
     SOCKET_ERROR_COUNT_FOR_REBOOT = 10
+    SOCKET_RECV_ERROR_COUNT_FOR_REBOOT =3
+    CONACK_TIMEOUT_COUNT_FOR_REBOOT = 1
 
     def __init__(self, host, port, clientId, options={}):
         if(not clientId):
@@ -605,6 +607,8 @@ class MqttClient:
         self.__signalInfoPublishTimer = time.time()
         self.__lastConnectTime = time.time()
         self.__socketErrorCount = 0
+        self.__socketRecvErrorCount = 0
+        self.__connectAckTimeoutCount = 0
         
     def process(self):
         try:
@@ -612,20 +616,28 @@ class MqttClient:
                 self.connect()
                 if(self.__sockInit):
                     self.__receive()
-                    if (self.__connected and ((self.__lastPingReqTime + 1.5 * self.keepAliveTimer) < time.time())):
-                        if (self.__lastPingRespTime is None):
-                            self.disconnect()
-                        else: 
-                            self.__sendPingReq()
-                            self.__lastPingReqTime = time.time()
-                            self.__lastPingRespTime = None
                     if (self.__connected):
+                        if ((self.__lastPingReqTime + 1.5 * self.keepAliveTimer) < time.time()):
+                            if (self.__lastPingRespTime is None):
+                                self.disconnect()
+                            else: 
+                                self.__sendPingReq()
+                                self.__lastPingReqTime = time.time()
+                                self.__lastPingRespTime = None
                         self.__publishNetworkStrengthInfo()
             self.__processHandlersTimeout()
             if (self.__connecting and ((self.__lastConnectTime + self.CONNECT_ACK_TIMEOUT) < time.time())):
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, "[MqttClientError, method = process]::Connect Ack timed out. Reseting connection.")
+                self.__connectAckTimeoutCount = self.__connectAckTimeoutCount + 1 
                 self.__resetSock()
             if (self.__socketErrorCount > self.SOCKET_ERROR_COUNT_FOR_REBOOT):
+                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = process]:: Rebooting as socket error count exceeded %d" % self.SOCKET_ERROR_COUNT_FOR_REBOOT)
+                at.reboot()
+            if (self.__socketRecvErrorCount > self.SOCKET_RECV_ERROR_COUNT_FOR_REBOOT):
+                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = process]:: Rebooting as socket error count exceeded %d" % self.SOCKET_RECV_ERROR_COUNT_FOR_REBOOT)
+                at.reboot()
+            if (self.__connectAckTimeoutCount > self.CONACK_TIMEOUT_COUNT_FOR_REBOOT):
+                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = process]:: Rebooting as ConAck timeout error count exceeded %d" % self.CONACK_TIMEOUT_COUNT_FOR_REBOOT)
                 at.reboot()
         except SocketError, msg:
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = process][SocketError]:: %s" % (str(msg)))
@@ -826,23 +838,25 @@ class MqttClient:
                 mqttMsg = self.__mqttDecoder.decode(data)
             else:
                 mqttMsg = None
-            if (mqttMsg):
-                self.__socketErrorCount = 0
+            while (mqttMsg):
+                self.__socketRecvErrorCount = 0
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Received message:%s' % mqttMsg.toString())
                 self.__handleMqttMessage(mqttMsg) 
+                mqttMsg = self.__mqttDecoder.decode()
         except MqttDecoderError, msg:
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
-            self.__resetSock()
+            self.__socketRecvErrorCount = self.__socketRecvErrorCount + 1
         except SocketTimeoutError:
             pass
         except (MqttFrameError, SocketError), msg:
             self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = __receive][%s]:: %s" % (msg.__class__.__name__ , str(msg)))
-            self.__resetSock()
+            self.__socketRecvErrorCount = self.__socketRecvErrorCount + 1
             
     def __handleMqttMessage(self, mqttMessage):
         self.__lastPingRespTime = time.time()
         msgType = mqttMessage.fixedHeader.messageType
         if msgType == self.CONNACK:
+            self.__connectAckTimeoutCount = 0
             self.__handleConnAckMsg(mqttMessage)
         elif msgType == self.PUBLISH:
             self.__handlePublishMsg(mqttMessage)
@@ -1033,8 +1047,10 @@ class MqttDecoder:
     def __state(self):
         return self.__state
     
-    def decode(self, data):
+    def decode(self, data=''):
         if(data):
+            data = self.__unhexelify(data)
+        if(data or self.__data ):
             self.__data = self.__data + data
             if(self.__state == self.READING_FIXED_HEADER_FIRST):
                 self.__decodeFixedHeaderFirstByte(self.__getByteStr())
@@ -1058,6 +1074,8 @@ class MqttDecoder:
                 if(self.__bytesDiscardedCounter == self.__remainingLength):
                     e = self.__error
                     self.__init()
+                    # Discard any data that is there.
+                    self.__data = ''
                     raise MqttDecoderError(e) 
             if(self.__state == self.MESSAGE_READY):
                 # returns a tuple of (mqttMessage, dataRemaining)
@@ -1065,19 +1083,23 @@ class MqttDecoder:
                 self.__init()
                 return mqttMsg
             if(self.__state == self.BAD):
-                # do not decode until disconnection.
-                raise MqttFrameError(self.__error)  
+                # Discard any data that is there.
+                self.__data = ''
+                e = self.__error
+                self.__init()
+                raise MqttFrameError(e)  
         return None 
             
     def __decodeFixedHeaderFirstByte(self, byteStr):
         byte = ord(byteStr)
-        self.__fixedHeader.messageType = (byte & 0xF0)
+        msgType = (byte & 0xF0)
+        self.__fixedHeader.messageType = msgType 
         self.__fixedHeader.dup = (byte & 0x08) >> 3
         self.__fixedHeader.qos = (byte & 0x06) >> 1
         self.__fixedHeader.retain = (byte & 0x01)
     
     def __decodeFixedHeaderRemainingLength(self):
-            while (1 and self.__data):
+            while (self.__data):
                 byte = ord(self.__getByteStr())
                 self.__remainingLength += (byte & 127) * self.__multiplier
                 self.__multiplier *= 128
@@ -1133,7 +1155,7 @@ class MqttDecoder:
             self.__state = self.MESSAGE_READY
         else:
             self.__state = self.DISCARDING_MESSAGE
-            self.__error = ('MqttDecoder: Unrecognised message type.') 
+            self.__error = ('MqttDecoder: Unrecognised message type.%s' %self.__hexlify(str(self.__fixedHeader.messageType))) 
             
     def __decodePayload(self, bytesRemaining):
         paloadBytes = self.__getNBytesStr(bytesRemaining)
@@ -1184,7 +1206,19 @@ class MqttDecoder:
         self.__bytesConsumedCounter = self.__bytesConsumedCounter + n
         return nBytes
     
-    def __init(self):   
+    def __hexlify(self, data):
+        a = []
+        for x in data:
+            a.append("%02X" % (ord(x)))
+        return ''.join(a)
+    
+    def __unhexelify(self, data):
+        a = []
+        for i in range(0, len(data), 2):
+            a.append(chr(int(data[i:i + 2], 16)))   
+        return ''.join(a) 
+    
+    def __init(self):
         self.__state = self.READING_FIXED_HEADER_FIRST
         self.__remainingLength = 0
         self.__multiplier = 1
@@ -1221,7 +1255,7 @@ class MqttEncoder:
         elif msgType in [MqttClient.PINGREQ, MqttClient.PINGRESP, MqttClient.DISCONNECT]:
             return self.__encodeFixedHeaderOnlyMsg(mqttMessage)
         else:
-            raise MqttEncoderError('MqttEncoder: Unknown message type.') 
+            raise MqttEncoderError('MqttEncoder: Unknown message type.%s' %self.__hexlify(msgType))
     
     def __encodeConnectMsg(self, mqttConnectMessage):
         if(isinstance(mqttConnectMessage, MqttConnectMsg)):
@@ -1389,7 +1423,12 @@ class MqttEncoder:
             return 0
         length = len(clientId)
         return length >= 1 and length <= 23
-                     
+    
+    def __hexlify(self, data):
+        a = []
+        for x in data:
+            a.append("%02X" % (ord(x)))
+        return ''.join(a)
         
 class MqttFixedHeader:
     def __init__(self, messageType=None, qos=0, dup=0, retain=0, remainingLength=0):
@@ -1941,7 +1980,7 @@ class Socket:
     closing = 0
     addr = None
     socketStates = {}
-    socketStates[0] = "Socket Closed."
+    socketStates[0] = "Socket in Closed state."
     socketStates[1] = "Socket with an active data transfer connection."
     socketStates[2] = "Socket suspended."
     socketStates[3] = "Socket suspended with pending data."
@@ -1990,20 +2029,27 @@ class Socket:
         try:
             self._sockno = self.__get_socketno()
             if(self._sockno):
-                self.__at.configureSocket(connId=self._sockno, ssl=self.__ssl, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp)
+                self.__at.configureSocket(connId=self._sockno, ssl=self.__ssl, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp, timeout=self._timeout+2)
             else:
                 raise SocketMaxCountError('All sockets in use. Total number of socket cannot exceed %d.' % self.maxconn)
         except Exception, e:
             raise SocketConfigError('Unable to configure socket - %s' % str(e))
         
     def __socketStatus(self):
-        return int(self.__at.socketStatus(self.__ssl, self._sockno).split(',')[1])
+        try:
+            status = self.__at.socketStatus(self.__ssl, self._sockno)
+            return int(status.split(',')[1])
+        except:
+            return 0
     
     def connect(self, addr):
         try:
+            cmd = self.__at.sendCmd('AT#SS')
+        except:
+            pass
+        try:
             self.__at.initGPRSConnection()
             self.addr = addr
-            self.close()#Hack for cleaning zombie sockets not closed
             self.__at.connectSocket(self._sockno, addr, ssl=self.__ssl, timeout=self._timeout + 3)
             self.connected = 1
         except(SocketMaxCountError, SocketConfigError), msg:
@@ -2033,6 +2079,10 @@ class Socket:
             raise SocketError('Error in connection accept.')  
                      
     def close(self):
+        try:
+            cmd = self.__at.sendCmd('AT#SS')
+        except:
+            pass
         tries = 3
         while(tries > 0):
             try:
@@ -2060,7 +2110,13 @@ class Socket:
             if(ss == 0):raise SocketError(self.socketStates[ss])
             if(ss == 3):
                 if(bufsize > 1500 or bufsize < 0):bufsize = 1500
-                return self.__at.socketRecv(self._sockno, bufsize, self._timeout + 3, self.__ssl)
+                data = self.__at.socketRecv(self._sockno, bufsize, self._timeout + 3, self.__ssl)
+                def __hexlify(data):
+                    a = []
+                    for x in data:
+                        a.append("%02X" % (ord(x)))
+                    return ''.join(a)
+                return data
             else:
                 return ''
         except self.__at.timeout:
@@ -2347,18 +2403,26 @@ class At:
         else:
             self.__mdm = MDM
     
-    def sendCmd(self, cmd, timeOut=1, expected='\r\nOK\r\n', addCR=1):
+    def sendCmd(self, cmd, timeOut=2, expected='\r\nOK\r\n', addCR=1, sendByte=0):
         try:
             if (timeOut <= 0): timeOut = 1
             try:
-                if (addCR == 1):
-                    r = self.__mdm.send(cmd + '\r', 5)
+                if(sendByte):
+                    r = -1
+                    for b in cmd:
+                        r = self.__mdm.sendbyte(b,0)
+                        if (r < 0):
+                            break
+                    if (addCR == 1):
+                        r = self.__mdm.sendbyte(0x0d,0)
                 else:
-                    r = self.__mdm.send(cmd, 5)
+                    if (addCR == 1):
+                        r = self.__mdm.send(cmd + '\r', 5)
+                    else:
+                        r = self.__mdm.send(cmd, 5)
             finally:
-                pass
-            if (r < 0):
-                raise self.timeout('Send "%s" timed out.' % cmd)
+                if (r < 0):
+                    raise self.timeout('Send "%s" timed out.' % cmd)
             timer = time.time() + timeOut
             response = cmd + self.__mdm.read()
             while (timeOut > 0 and (not expected or response.find(expected) == -1)):
@@ -2765,16 +2829,15 @@ class At:
         if (self.sendCmd('AT#SSLS=1').find('#SSLEN: 1,1') >= 0):
             self.sendCmd('AT#SSLSECCFG=%d,%d,%d' % (connId, cipherSuite, authMode))
  
-    def configureSocket(self, connId, ssl=0, cid=1, pktSz=512, maxTo=0, connTo=600, txTo=50, keepAlive=0, listenAutoRsp=0):
+    def configureSocket(self, connId, ssl=0, cid=1, pktSz=512, maxTo=0, connTo=600, txTo=50, keepAlive=0, listenAutoRsp=0, timeout=62):
     # connId(1-6),cid(0-5),pktSz(0-1500),maxTo(0-65535),connTo(10-1200),txTo(0-255)
     # keepAlive(0 – 240)min
         if(ssl):
             if (self.sendCmd('AT#SSLS=1').find('#SSLEN: 1,1') >= 0):
-                self.sendCmd('AT#SSLCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo))
-            #self.sendCmd('AT#SSLCFGEXT= %d,0,0,%d,%d' % (connId, keepAlive, listenAutoRsp))
+                self.sendCmd('AT#SSLCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo),timeout)
         else:
-            self.sendCmd('AT#SCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo))
-            self.sendCmd('AT#SCFGEXT= %d,0,0,%d,%d' % (connId, keepAlive, listenAutoRsp))
+            self.sendCmd('AT#SCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo),timeout)
+        self.sendCmd('AT#SCFGEXT= %d,0,1,%d,%d' % (connId, keepAlive, listenAutoRsp),timeout)
         
     def connectSocket(self, connId, addr, ssl=0, proto=0, closureType=0, IPort=0, timeout=60):
         connMode = 1  # always connect in command mode
@@ -2791,11 +2854,13 @@ class At:
             self.sendCmd('AT#SH=%d' % connId, timeout)
         
     def socketRecv(self, connId, maxByte, timeout, ssl=0):
+        #receives data in hex mode
         if(ssl):
-            resp = self.sendCmd('AT#SSLRECV=%s,%s' % (str(connId), str(maxByte)), timeout).strip('\r\nOK\r\n').split('\r\n')
+            resp = self.sendCmd('AT#SSLRECV=%d,%d' % (connId, maxByte), timeout).strip('\r\nOK\r\n').split('\r\n')
             i, expectedResponse = 0, "#SSLRECV:"
         else:
-            resp = self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout).strip('\r\nOK\r\n').split('\r\n')
+            cmd = self.sendCmd('AT#SRECV=%d,%d' % (connId, maxByte), timeout)
+            resp = cmd.strip('\r\nOK\r\n').split('\r\n')
             i, expectedResponse = 0, "#SRECV: %d" % connId
         for r in resp:
             i = i + 1
@@ -2803,6 +2868,12 @@ class At:
                 break
         return '\r\n'.join(resp[i:len(resp)])
     
+    def __hexlify(self, data):
+        a = []
+        for x in data:
+            a.append("%02X" % (ord(x)))
+        return ''.join(a)
+
     def socketSend(self, connId, data, bytestosend, timeout, ssl=0, multiPart=0):
     # bytestosend(1-1500)
         while(data):
@@ -2813,20 +2884,20 @@ class At:
                     self.sendCmd('AT#SSLSENDEXT=%d,%d' % (connId, sendDataSize), 1, '')
                 else:
                     self.sendCmd('AT#SSENDEXT=%d,%d' % (connId, sendDataSize), 1, '')
-                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0)
+                self.sendCmd(partData, timeout, expected='OK\r\n', addCR=0, sendByte=0)
             except:
                 pass    
             data = data[sendDataSize:]
         return bytestosend
 
     def socketStatus(self, ssl=0, connId=None):
-        cmd = self.sendCmd('AT#SS')
         if(ssl):
             if(connId):
-                return self.sendCmd('AT#SSLS=1').split('\r\n')[connId].replace('#SSLS: ', '')
+                return self.sendCmd('AT#SSLS=1',5).split('\r\n')[connId].replace('#SSLS: ', '')
             else:
-                return self.sendCmd('AT#SSLS=1').replace('#SSLS: ', '').split('\r\n')[1:7]            
+                return self.sendCmd('AT#SSLS=1',5).replace('#SSLS: ', '').split('\r\n')[1:7]            
         else:
+            cmd = self.sendCmd('AT#SS',5)
             if(connId):
                 return cmd.split('\r\n')[connId].replace('#SS: ', '')
             else:
@@ -2838,12 +2909,12 @@ class At:
     
     def resumeSocket(self, connId,ssl=0):
         if(ssl):
-            self.sendCmd('AT#SSLO=' % connId)
+            self.sendCmd('AT#SSLO=%d' % connId)
         else:
-            self.sendCmd('AT#SO=' % connId)
+            self.sendCmd('AT#SO=%d' % connId)
         
     def socketInfo(self, connId):
-        return self.sendCmd('AT#SI=' % connId).split('\r\n')[1].replace('#SI: ', '').split(',')
+        return self.sendCmd('AT#SI=%d' % connId).split('\r\n')[1].replace('#SI: ', '').split(',')
     
     def socketListen(self, connId, listenState, listenPort, closureType=0, timeout=60):
         self.sendCmd('AT#SL=%d,%d,%d,%d' % (connId, listenState, listenPort, closureType), timeout)
