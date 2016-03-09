@@ -51,13 +51,15 @@ class InstaMsg:
         if(not callable(connectHandler)): raise ValueError('connectHandler should be a callable object.')
         if(not callable(disConnectHandler)): raise ValueError('disConnectHandler should be a callable object.')
         if(not callable(oneToOneMessageHandler)): raise ValueError('oneToOneMessageHandler should be a callable object.')
+        if(clientId): 
+            if(len(clientId) != 36): raise ValueError('clientId is not a valid uuid e.g. cbf7d550-7204-11e4-a2ad-543530e3bc65')
         self.__clientId = clientId
         self.__authKey = authKey 
         self.__smsConfigured = 0
         self.__provisioned = 0
         self.__modem = None
         self.__provisioningData = {}
-        if(self.__clientId and self.__authKey):
+        if(self.__clientId):
             self.__provisioningState = PROVISIONING_COMPLETED
             self.__provisioned = 1
         else:
@@ -70,27 +72,17 @@ class InstaMsg:
         if( not options.has_key('onProvisionCallback')): options['onProvisionCallback'] = None
         self.__configHandler = options['configHandler']
         self.__onProvisionCallBack = options['onProvisionCallback']
-        self.__filesTopic = "instamsg/clients/" + clientId + "/files";
-        self.__fileUploadUrl = "/api/%s/clients/%s/files" % (self.INSTAMSG_API_VERSION, clientId)
-        self.__enableServerLoggingTopic = "instamsg/clients/" + clientId + "/enableServerLogging";
-        self.__serverLogsTopic = "instamsg/clients/" + clientId + "/logs"
-        self.__rebootTopic = "instamsg/clients/" + clientId + "/reboot"
-        self.__metadataTopic = "instamsg/client/metadata"
-        self.__sessionTopic = "instamsg/client/session"
-        self.__configServerToClientTopic = "instamsg/clients/" + clientId + "/config/serverToClient"
-        self.__configClientToServerTopic = "instamsg/client/config/clientToServer"
+        self.__init(clientId)
         self.__logsListener = []
         self.__defaultReplyTimeout = self.INSTAMSG_RESULT_HANDLER_TIMEOUT
         self.__msgHandlers = {}
         self.__sendMsgReplyHandlers = {}  # {handlerId:{time:122334,handler:replyHandler, timeout:10, timeOutMsg:"Timed out"}}
         self.__sslEnabled = 0
         self.__initOptions(options)
-        self._broker = None
         self.__mqttClient = None
         if(self.__enableTcp):
-            clientIdAndUsername = self.__getClientIdAndUsername(clientId)
-            mqttoptions = self.__mqttClientOptions(clientIdAndUsername[1], authKey, self.__keepAliveTimer, self.__sslEnabled)
-            self.__mqttClient = MqttClient(self.INSTAMSG_HOST, self.__port, clientIdAndUsername[0], mqttoptions)
+            mqttoptions = self.__mqttClientOptions(clientId, authKey, self.__keepAliveTimer, self.__sslEnabled)
+            self.__mqttClient = MqttClient(self.INSTAMSG_HOST, self.__port, mqttoptions)
             self.__mqttClient.onConnect(self.__onConnect)
             self.__mqttClient.onDisconnect(self.__onDisConnect)
             self.__mqttClient.onDebugMessage(self.__handleDebugMessage)
@@ -98,6 +90,18 @@ class InstaMsg:
             if(self.__provisioned):
                 time.sleep(5)
                 self.__mqttClient.connect()
+                
+    def __init(self, clientId):
+        if (clientId):
+            self.__filesTopic = "instamsg/clients/%s/files" % clientId
+            self.__fileUploadUrl = "/api/%s/clients/%s/files" % (self.INSTAMSG_API_VERSION, clientId)
+            self.__enableServerLoggingTopic = "instamsg/clients/%s/enableServerLogging" % clientId
+            self.__serverLogsTopic = "instamsg/clients/%s/logs" % clientId
+            self.__rebootTopic = "instamsg/clients/%s/reboot" % clientId
+            self.__metadataTopic = "instamsg/client/metadata"
+            self.__sessionTopic = "instamsg/client/session"
+            self.__configServerToClientTopic = "instamsg/clients/%s/config/serverToClient" % clientId
+            self.__configClientToServerTopic = "instamsg/client/config/clientToServer" % clientId
         
     def __initOptions(self, options):
         if(self.__options.has_key('enableSocket')):
@@ -127,7 +131,7 @@ class InstaMsg:
         try:
             while(not self.__provisioned):
                 self.__provision()
-                time.sleep(5)
+                time.sleep(30)
                 if(self.__provisioned):
                     break
             if(self.__mqttClient):
@@ -137,6 +141,7 @@ class InstaMsg:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
                     
     def close(self):
+        if(not self.__provisioned):InstaMsgError("Cannot close connection as device not provisioned.")
         try:
             self.__mqttClient.disconnect()
             self.__mqttClient = None
@@ -148,6 +153,7 @@ class InstaMsg:
             return - 1
     
     def publish(self, topic, msg, qos=INSTAMSG_QOS0, dup=0, resultHandler=None, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
+        if(not self.__provisioned):InstaMsgPubError("Cannot publish as device not provisioned.")
         if(self.__mqttClient and topic):
             try:
                 self.__mqttClient.publish(topic, msg, qos, dup, resultHandler, timeout)
@@ -156,6 +162,7 @@ class InstaMsg:
         else: raise ValueError("Topic cannot be null or empty string.")
     
     def subscribe(self, topic, qos, msgHandler, resultHandler, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
+        if(not self.__provisioned):InstaMsgSubError("Cannot subscribe device not provisioned.")
         if(self.__mqttClient):
             try:
                 if(not callable(msgHandler)): raise ValueError('msgHandler should be a callable object.')
@@ -177,6 +184,7 @@ class InstaMsg:
             
 
     def unsubscribe(self, topics, resultHandler, timeout=INSTAMSG_RESULT_HANDLER_TIMEOUT):
+        if(not self.__provisioned):InstaMsgUnSubError("Cannot unsubscribe as device not provisioned.")
         if(self.__mqttClient):
             try:
                 def _resultHandler(result):
@@ -194,6 +202,7 @@ class InstaMsg:
             raise InstaMsgUnSubError("Cannot unsubscribe as TCP is not enabled. Two way messaging only possible on TCP and not HTTP")
     
     def send(self, clienId, msg, qos=INSTAMSG_QOS0, dup=0, replyHandler=None, timeout=INSTAMSG_MSG_REPLY_HANDLER_TIMEOUT):
+        if(not self.__provisioned):InstaMsgSendError("Cannot send message as device not provisioned.")
         try:
             messageId = self._generateMessageId()
             msg = Message(messageId, clienId, msg, qos, dup, replyTopic=self.__clientId, instaMsg=self)._sendMsgJsonString()
@@ -203,7 +212,7 @@ class InstaMsg:
             raise InstaMsgSendError(str(e))
         
     def log(self, level, message):
-        if(self.__enableLogToServer):
+        if(self.__enableLogToServer and self.__provisioned):
             self.publish(self.__serverLogsTopic, message, 1)
         else:
             try:
@@ -211,16 +220,26 @@ class InstaMsg:
             except:
                 pass
             
-    def publishConfig(self,key,value,resultHandler):
+    def publishConfig(self, configs, resultHandler=None):
+        if(not self.__provisioned):InstaMsgSendError("Cannot publish config as device not provisioned.")
         try:
-            if(key):
-                message ='{"key":%s,"value":%s}' %(str(key),str(value))
+            configArray=[]
+            for key in configs:
+                k=str(key)
+                v=configs[key]
+                if(isinstance(v,str)):
+                   configArray.append('{"key":"%s","val":"%s"}' %(str(k),str(v)))
+                else:
+                   configArray.append('{"key":"%s","val":%s}' %(str(k),str(v))) 
                 def _resultHandler(result):
                     if(result.failed()):
-                        resultHandler(Result,(key,value),0,result.cause())    
+                        if(callable(resultHandler)):resultHandler(Result(configs,0,result.cause()))  
+                        self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Config published to server: %s" %str(configs))  
                     else:
-                        resultHandler(Result,(key,value),1)
-                self.publish(self.self.__configClientToServerTopic, message, qos=INSTAMSG_QOS1, dup=0, resultHandler=_resultHandler)
+                        if(callable(resultHandler)):resultHandler(Result(configs,1))
+                        self.log(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsg]::Error publishing Config to server: %s" %str(result.cause()))  
+            message = str(configArray)
+            self.publish(self.self.__configClientToServerTopic, message, qos=INSTAMSG_QOS1, dup=0, resultHandler=_resultHandler)
         except:
             pass
             
@@ -251,47 +270,67 @@ class InstaMsg:
     
     
     def __provision(self):
-        if(self.__provisioningState == PROVISIONIG_STARTED):
-            if(not self.__smsConfigured):
-                at.setSmsMode()
-                at.setSmsMsgFormat(1)
-            smsIndexes = at.listSmsIndexes(4)
-            dataKeys = ['sg_pass', 'sg_pin', 'sg_apn', 'sg_user', 'prov_pin']
+        try:
             provisioningData = {}
-            for smsIndex in smsIndexes:
-                sms = at.getSms(smsIndex)
-                for dataKey in dataKeys:
-                    s='"%s":"' % dataKey
-                    a=sms.find(s)+len(s)
-                    b=sms.find('","',a)
-                    if(b==-1): b = -2
-                    provisioningData[dataKey]=sms[a:b]
-            if(len(provisioningData) == len(dataKeys)):
-                self.__provisioningData = provisioningData
-                self.__provisioningState = PROVISIONIG_SMS_READ
-        if(self.__provisioningState == PROVISIONIG_SMS_READ):
-            self.__sendProvisioningMsg(provisioningData)
-            self.__provisioningState = PROVISIONIG_MSG_SENT
+            if(self.__provisioningState == PROVISIONIG_STARTED):
+#                if(not self.__smsConfigured):
+#                    at.setSmsMode()
+#                    at.setSmsMsgFormat(1)
+#                    self.__smsConfigured = 1
+#                smses = at.getSmses(1,4)
+                smses = ['{"sg_pass":"","sg_pin":"","sg_apn":"airtelgprs.com","sg_user":"","prov_pin":"359785020113018"}']
+                dataKeys = ['sg_pass', 'sg_pin', 'sg_apn', 'sg_user', 'prov_pin']
+                for sms in smses:
+                    sms = "".join(sms.split())
+                    for dataKey in dataKeys:
+                        s='"%s":"' % dataKey
+                        if(sms.find(s) >=0):
+                            a=sms.find(s)+len(s)
+                            b=sms.find('","',a)
+                            if(b==-1): b = -2
+                            provisioningData[dataKey]=sms[a:b]
+                        else:break
+                    if(len(provisioningData) == len(dataKeys)):
+                        self.__provisioningData = provisioningData
+                        self.__provisioningState = PROVISIONIG_SMS_READ
+                        self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Provisioning sms read: %s" % sms)
+                        break
+                    elif(provisioningData):
+                        self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Incomplete provisioning sms received: %s" %sms)
+            if(not provisioningData):
+                self.log(INSTAMSG_LOG_LEVEL_INFO, "No provisioning sms read.")
+            if(self.__provisioningData  and self.__provisioningState == PROVISIONIG_SMS_READ):
+                self.__provisioningState = PROVISIONIG_MSG_SENT
+                self.__sendProvisioningMsg(self.__provisioningData)
+        except Exception, e:
+            self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
+                    
+            
             
     def __sendProvisioningMsg(self,provisioningData):
         if(not self.__modem):
             self.__modem = self.__initializeModem(provisioningData)
         provId = self.__modem.imei
         provPin = provisioningData['prov_pin']
-        def _provAckHandler(result):
-            if(result.succeeded()):
-                provisioningData['client_id'] = result[0]
-                provisioningData['auth_token'] = result[1]
-                if(callable(self.__onProvisionCallBack)):
-                    self.__onProvisionCallBack (provisioningData)
-                    self.__provisioned, self.__provisioningState = 1 ,PROVISIONING_COMPLETED
-                    self.log("[InstaMsg]::Provisioning completed.")
-            else:
-                self.__provisioningState = PROVISIONIG_SMS_READ
-                self.log("[InstaMsg]::Provisioning failed. %s" % result.cause())
-        provResponse = self.__mqttClient.provision(provId, provPin, _provAckHandler)
+        self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Sending provisioning message...")
+        provResponse = self.__mqttClient.provision(provId, provPin)
+        if(provResponse):
+            provisioningData['client_id'] = provResponse[0]
+            provisioningData['auth_token'] = provResponse[1]
+            self.__onProvisionCallBack (provisioningData)
+            self.__init(provResponse[0])
+            self.__provisioned, self.__provisioningState = 1 ,PROVISIONING_COMPLETED
+            self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Provisioning completed.")
+            self.__initMqttClient(provResponse[0],provResponse[1])
+            at.deleteSms(1,4)
+        else:
+            self.__provisioningState = PROVISIONIG_SMS_READ
+            self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Provisioning failed.")
+            
+    def __initMqttClient(self, clientId, authKey):
+            mqttoptions = self.__mqttClientOptions(clientId, authKey, self.__keepAliveTimer, self.__sslEnabled)
+            self.__mqttClient.setOptions(mqttoptions)
         
-    
     def __initializeModem(self,provisioningData):
         modemSettings = {
           'sim_pin':provisioningData["sg_pin"],
@@ -518,9 +557,10 @@ class InstaMsg:
                 self.__oneToOneMessageHandler(msg)
         
     def __mqttClientOptions(self, username, password, keepAliveTimer, sslEnabled):
-        if(len(password) > self.INSTAMSG_MAX_BYTES_IN_MSG): raise ValueError("Password length cannot be more than %d bytes." % self.INSTAMSG_MAX_BYTES_IN_MSG)
+        if(password and len(password) > self.INSTAMSG_MAX_BYTES_IN_MSG): raise ValueError("Password length cannot be more than %d bytes." % self.INSTAMSG_MAX_BYTES_IN_MSG)
         if(keepAliveTimer > 32768 or keepAliveTimer < self.INSTAMSG_KEEP_ALIVE_TIMER): raise ValueError("keepAliveTimer should be between %d and 32768" % self.INSTAMSG_KEEP_ALIVE_TIMER)
         options = {}
+        options['clientId'] = "EMPTY"
         options['hasUserName'] = 1
         options['hasPassword'] = 1
         options['username'] = username
@@ -536,19 +576,6 @@ class InstaMsg:
         options['reconnectTimer'] = self.INSTAMSG_RECONNECT_TIMER
         options['sslEnabled'] = sslEnabled
         return options
-    
-    def __getClientIdAndUsername(self, clientId):
-        if(clientId): 
-            errMsg = 'clientId is not a valid uuid e.g. cbf7d550-7204-11e4-a2ad-543530e3bc65'
-            if(len(clientId) != 36): raise ValueError(errMsg)
-            c = clientId.split('-')
-            if(len(c) != 5): raise ValueError(errMsg)
-            cId = '-'.join(c[0:4])
-            userName = c[4 ]
-            if(len(userName) != 12): raise ValueError(errMsg)
-            return (cId, userName)
-        else:
-            return ('','')
     
     def __parseJson(self, jsonString):
         return eval(jsonString)  # Hack as not implemented Json Library
@@ -676,22 +703,19 @@ class MqttClient:
     # Extra var
     SIGNALINFO_PERIODIC_INTERVAL = 300
     CONNECT_ACK_TIMEOUT = 300
-    SOCKET_ERROR_COUNT_FOR_REBOOT = 10
+    SOCKET_ERROR_COUNT_FOR_REBOOT = 5
     SOCKET_RECV_ERROR_COUNT_FOR_REBOOT =3
     CONACK_TIMEOUT_COUNT_FOR_REBOOT = 1
+    TCP_KEEP_ALIVE = 240
 
-    def __init__(self, host, port, clientId, options={}):
-        if(not clientId):
-            raise ValueError('clientId cannot be null.')
+    def __init__(self, host, port, options={}):
         if(not host):
             raise ValueError('host cannot be null.')
         if(not port):
             raise ValueError('port cannot be null.')
         self.host = host
         self.port = port
-        self.clientId = clientId
         self.options = options
-        self.options['clientId'] = clientId
         self.keepAliveTimer = self.options['keepAliveTimer']
         self.reconnectTimer = options['reconnectTimer']
         self.sslEnabled = self.options['sslEnabled']
@@ -725,7 +749,10 @@ class MqttClient:
         self.__socketErrorCount = 0
         self.__socketRecvErrorCount = 0
         self.__connectAckTimeoutCount = 0
-        
+    
+    def setOptions(self,options): 
+        self.options = options   
+    
     def process(self):
         try:
             if(not self.__disconnecting):
@@ -746,12 +773,7 @@ class MqttClient:
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, "[MqttClientError, method = process]::Connect Ack timed out. Reseting connection.")
                 self.__connectAckTimeoutCount = self.__connectAckTimeoutCount + 1 
                 self.__resetSock()
-            if (self.__socketErrorCount > self.SOCKET_ERROR_COUNT_FOR_REBOOT):
-                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = process]:: Rebooting as socket error count exceeded %d" % self.SOCKET_ERROR_COUNT_FOR_REBOOT)
-                at.reboot()
-            if (self.__socketRecvErrorCount > self.SOCKET_RECV_ERROR_COUNT_FOR_REBOOT):
-                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = process]:: Rebooting as socket error count exceeded %d" % self.SOCKET_RECV_ERROR_COUNT_FOR_REBOOT)
-                at.reboot()
+            self.__processErrorCount("process")
             if (self.__connectAckTimeoutCount > self.CONACK_TIMEOUT_COUNT_FOR_REBOOT):
                 self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = process]:: Rebooting as ConAck timeout error count exceeded %d" % self.CONACK_TIMEOUT_COUNT_FOR_REBOOT)
                 at.reboot()
@@ -762,31 +784,53 @@ class MqttClient:
             self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[MqttClientError, method = process][Exception]:: %s %s" % (str(sys.exc_info()[0]), str(sys.exc_info()[1])))
     
     def provision(self, provId, provPin, timeout = 300):
+        auth = None
         try:
-            self.__provisioned = 0
-            self.__initSock()
-            auth = None
-            options = self.options.copy()
-            options['clientId'] = 'NONE'
-            options['hasUserName'] = 1
-            options['hasPassword'] = 1
-            options['username'] = provId
-            options['password'] = provPin
-            fixedHeader = MqttFixedHeader(self.CONNECT, qos=0, dup=0, retain=0)
-            provisionMsg = self.__mqttMsgFactory.message(fixedHeader, self.options, self.options)
-            encodedMsg = self.__mqttEncoder.encode(provisionMsg)''
-            self.__sendall(encodedMsg)
-            timeout = time.time() + timeout
-            while(timeout > time.time() and not self.__provisioned):
-                mqttMsg = self.__receive()
-                if mqttMsg.fixedHeader.messageType == self.PROVACK:
-                    auth = self.__getAuthInfoFromProvAckMsg(mqttMsg)
+            try:
+                self.__processErrorCount("provision")
+                self.__provisioned = 0
+                self.__initSock()
+                if(self.__sockInit):
+                    options = self.options.copy()
+                    options['clientId'] = 'NONE'
+                    options['hasUserName'] = 1
+                    if (provPin):
+                        options['hasPassword'] = 1
+                    else:
+                        options['hasPassword'] = 0
+                    options['username'] = provId
+                    options['password'] = provPin
+                    fixedHeader = MqttFixedHeader(self.CONNECT, qos=0, dup=0, retain=0)
+                    provisionMsg = self.__mqttMsgFactory.message(fixedHeader, options, options)
+                    encodedMsg = self.__mqttEncoder.encode(provisionMsg)
+                    self.__sendall(encodedMsg)
+                    timeout = time.time() + timeout
+                    while(timeout > time.time() and not self.__provisioned):
+                        time.sleep(10)
+                        mqttMsg = self.__receive()
+                        if(mqttMsg and mqttMsg.fixedHeader.messageType == self.PROVACK):
+                            auth = self.__getAuthInfoFromProvAckMsg(mqttMsg)
+                            self.__socketErrorCount = 0
+                            break
+            except SocketConfigError, msg:
+                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = provision][SocketConfigError]:: %s. Rebooting..." % (str(msg)))
+                at.reboot()
+            except (SocketError, SocketTimeoutError), msg:
+                self.__socketErrorCount = self.__socketErrorCount + 1
+                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = provision][SocketError]:: %s" % (str(msg)))
+            except Exception, e:
+                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClientError, method = provision]:: %s" % (str(e)))
         finally:
             self.__closeSocket()
             self.__sockInit = 0
+            if(auth):
+                self.__provisioned = 1
             return auth
             
     def connect(self):
+        if(not self.options['clientId']):raise ValueError('clientId cannot be null.')
+        if(self.options['hasPassword'] and not self.options['password']): raise ValueError('Password cannot be null.')
+        if(self.options['hasUserName'] and not self.options['username']): raise ValueError('Username cannot be null.')
         try:
             self.__initSock()
             if(self.__connecting is 0 and self.__sockInit):
@@ -917,7 +961,15 @@ class MqttClient:
                 return -1
         except:
             return -1
-        
+
+    def __processErrorCount(self, methodName):
+            if (self.__socketErrorCount > self.SOCKET_ERROR_COUNT_FOR_REBOOT):
+                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = %s]:: Rebooting as socket error count exceeded %d" % (methodName, self.SOCKET_ERROR_COUNT_FOR_REBOOT))
+                at.reboot()
+            if (self.__socketRecvErrorCount > self.SOCKET_RECV_ERROR_COUNT_FOR_REBOOT):
+                self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = %s]:: Rebooting as socket error count exceeded %d" % (methodName, self.SOCKET_RECV_ERROR_COUNT_FOR_REBOOT))
+                at.reboot()
+                        
     def __parseJson(self, jsonString):
         return eval(jsonString)  # Hack as not implemented Json Library 
           
@@ -1069,12 +1121,11 @@ class MqttClient:
         provisionReturnCode = mqttMessage.provisionReturnCode
         if(provisionReturnCode == self.CONNECTION_ACCEPTED):
             payload = mqttMessage.payload
-            clientId=payload[0:35]
+            clientId=payload[0:36]
             authToken = payload[37:]
-            self.__provisioned = 1
             return (clientId, authToken)
         else:
-            msg = self.__handleProvisionAndConnectAckCode("Provisioning", provisionReturnCode)
+            self.__handleProvisionAndConnectAckCode("Provisioning", provisionReturnCode)
             return None
             
             
@@ -1161,7 +1212,7 @@ class MqttClient:
             if(self.__sock is not None):
                 self.__closeSocket()
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Opening socket to %s:%s' % (self.host, str(self.port)))
-            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at, self.sslEnabled)
+            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at, self.TCP_KEEP_ALIVE, self.sslEnabled)
             self.__sock.connect((self.host, self.port))
             self.__sockInit = 1
             self.__waitingReconnect = 0
@@ -1347,7 +1398,7 @@ class MqttDecoder:
                     grantedQos.append(qos)
                 self.__payload = grantedQos
                 self.__state = self.MESSAGE_READY
-            elif self.__fixedHeader.messageType == MqttClient.PUBLISH:
+            elif self.__fixedHeader.messageType in (MqttClient.PUBLISH, MqttClient.PROVACK):
                 self.__payload = paloadBytes
                 self.__state = self.MESSAGE_READY
     
@@ -1442,7 +1493,7 @@ class MqttEncoder:
             # Encode Payload
             clientId = self.__encodeStringUtf8(mqttConnectMessage.clientId)
             if(not self.__isValidClientId(clientId)):
-                raise ValueError("MqttEncoder: invalid clientId: " + clientId + " should be less than 23 chars in length.")
+                raise ValueError("MqttEncoder: invalid clientId: %s should be less than 23 chars in length."% str(clientId))
             encodedPayload = self.__encodeIntShort(len(clientId)) + clientId
             if(mqttConnectMessage.isWillFlag):
                 encodedPayload = encodedPayload + self.__encodeIntShort(len(mqttConnectMessage.willTopic)) + self.__encodeStringUtf8(mqttConnectMessage.willTopic)
@@ -1590,7 +1641,7 @@ class MqttEncoder:
                     break
         return  remainingLength   
     
-    def __encodeIntShort(self, number):  
+    def __encodeIntShort(self, number): 
         return chr(number / 256) + chr(number % 256)
     
     def __encodeStringUtf8(self, s):
@@ -2176,7 +2227,7 @@ class Socket:
     socketStates[5] = "Socket with an incoming connection. Waiting for the accept or shutdown command."
     
     def __init__(self, timeout, at, keepAlive=default_keep_alive, ssl=0):
-        if(keepAlive < 0 or keepAlive > 240): raise SocketError("Keep alive should be between 0-240")
+        if(keepAlive < 0 or keepAlive > 240): raise ValueError("Keep alive should be between 0-240")
         self._timeout = timeout or 10  # sec
         self._keepAlive = keepAlive 
         self._listenAutoRsp = 0
@@ -2622,7 +2673,7 @@ class At:
                 else:
                     raise self.timeout('%s receive timed out for %s.' % (self.__mdm.__class__.__name__, cmd))
             if(response.find('ERROR') > 0):
-                raise self.error('%s ERROR response received for "%s".' % (self.__mdm.__class__.__name__, cmd)) 
+                raise self.error('%s ERROR response received for "%s":%s' % (self.__mdm.__class__.__name__, cmd, "".join(response.split("\r\n")))) 
             else:
                 if(response.find("SRING:") >= 0):
                    r = response.split('\r\n')
@@ -2639,45 +2690,53 @@ class At:
     
     def setSmsMode(self,mode=0):
         try:
-            response = self.sendCmd('AT#SMSMODE?')
-            if(response.find('#SMSMODE= %d' % mode) < 0):
-                self.sendCmd('AT#SMSMODE=%d' % mode)
+            response = self.sendCmd('AT#SMSMODE?',5)
+            if(response.find('#SMSMODE: %d' % mode) < 0):
+                self.sendCmd('AT#SMSMODE=%d' % mode,5)
             return 1
         except:
             return 0
     
     def setSmsMsgFormat(self,format=1):
-        try:
-            response = self.sendCmd('AT+CMGF?')
-            if(response.find('+CMGF= %d' % format) < 0):
-                self.sendCmd('AT+CMGF=%d' % format)
-            return 1
-        except:
-            return 0
+        response = self.sendCmd('AT+CMGF?',5)
+        if(response.find('+CMGF: %d' % format) < 0):
+            self.sendCmd('AT+CMGF=%d' % format,5)
+        return 1
         
-    def listSmsIndexes(self, status=0):
-        try:
-            resp = self.sendCmd('AT+CMGL=%d' % status)
-            k = resp.replace('+CMGL: ', '').split('\r\n')
-            if(len(k) > 0):
-                return k[1:]
-            return []
-        except:
+    def getSmsMsgFormat(self):
+        response = self.sendCmd('AT+CMGF?',5)
+        if(response.find('+CMGF: 1') < 0):
             return 0
+        else : return 1
+            
+    def getSmses(self, format, status=0):
+        s = {0:"REC UNREAD",1:"REC READ", 2:"STO UNSENT", 3:"STO SENT", 4:"ALL"}
+        if (format == 1):
+            status = s[status]
+            cmd = 'AT+CMGL="%s"' % str(status)
+        else:
+            cmd = 'AT+CMGL=%d' % status
+        resp = self.sendCmd(cmd,10)
+        respArray= resp.split("\r\n")
+        smses = []
+        i = 0
+        lenRespArray = len(respArray)
+        while(i < lenRespArray):
+            if (respArray[i].find("AT+CMGL") >= 0):
+                pass
+            elif (respArray[i].find("+CMGL") >= 0):
+                smses.append(respArray[i+1])
+            i = i + 1
+        
+        return smses
     
     def getSms(self, index):
-        try:
-            return self.sendCmd('AT+CMGR=%d' % index).split('\r\n')[2]
-        except:
-            return 0
+        return self.sendCmd('AT+CMGR=%d' % index,5).split('\r\n')[2]
         
-    def deleteSms(self,index, delflag =0):
-        try:
-            self.sendCmd('AT+CMGD=%d,%d' % (index, delflag))
-            return 1
-        except:
-            return 0
-    
+    def deleteSms(self,index=1, delflag =0):
+        self.sendCmd('AT+CMGD=%d,%d' % (index, delflag),10)
+        return 1
+        
     def reboot(self):
         try:
             self.sendCmd('AT#REBOOT')
@@ -2936,15 +2995,20 @@ class At:
                 continue
         return success  
     
+    def getNetworkStatus(self):
+        try:
+            return self.sendCmd('AT#MONI', 5).split("\r\n")[1].replace('#MONI: ', '')
+        except:
+            return ""
+        
     def initGPRS(self, pdpContextId=1, apn='', userid='', passw='', retry=20):
         success = 0
         if(retry <= 0): retry = 1
+        MOD.sleep(10)
         while (retry > 0):
             retry = retry - 1
             try:
-                gprs = self.sendCmd('AT+CGDCONT?;#USERID?', 1)
-                if(gprs.find('%d,"IP","%s"' % (pdpContextId, apn)) < 0 or gprs.find('#USERID: "%s"' % userid) < 0):
-                    self.sendCmd('AT+CGDCONT=%d,"IP","%s";#USERID="%s";#PASSW="%s"' % (pdpContextId, apn, userid, passw))    
+                self.sendCmd('AT+CGDCONT=%d,"IP","%s";#USERID="%s";#PASSW="%s"' % (pdpContextId, apn, userid, passw))    
                 self.sendCmd('AT+CGATT?', 5, '+CGATT: 1')
                 self.setGPRSContextConfig()
                 success = 1
@@ -2959,6 +3023,7 @@ class At:
         success = 0
         if(pdpContextId > 5 or pdpContextId < 1): return 0
         if(retry <= 0): retry = 1
+        MOD.sleep(10)
         while (retry > 0):
             retry = retry - 1
             try:
@@ -2999,7 +3064,7 @@ class At:
         while (retry > 0):
             retry = retry - 1
             try:
-                if(self.sendCmd('AT#SGACT?', 1).find('#SGACT: %d,1' % pdpContextId) > 0): status = 1
+                if(self.sendCmd('AT#SGACT?', 2).find('#SGACT: %d,1' % pdpContextId) > 0): status = 1
                 break
             except:
                 MOD.sleep(10)
