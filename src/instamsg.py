@@ -1269,7 +1269,7 @@ class MqttDecoder:
     
     def decode(self, data=''):
         if(data):
-            data = self.__unhexelify(data)
+            data = HexEcoderDecoder.unhexlify(data)
         if(data or self.__data ):
             self.__data = self.__data + data
             if(self.__state == self.READING_FIXED_HEADER_FIRST):
@@ -1382,7 +1382,7 @@ class MqttDecoder:
             self.__state = self.MESSAGE_READY
         else:
             self.__state = self.DISCARDING_MESSAGE
-            self.__error = ('MqttDecoder: Unrecognised message type.%s' %self.__hexlify(str(self.__fixedHeader.messageType))) 
+            self.__error = ('MqttDecoder: Unrecognised message type.%s' %HexEcoderDecoder.hexlify(str(self.__fixedHeader.messageType))) 
             
     def __decodePayload(self, bytesRemaining):
         paloadBytes = self.__getNBytesStr(bytesRemaining)
@@ -1433,18 +1433,6 @@ class MqttDecoder:
         self.__bytesConsumedCounter = self.__bytesConsumedCounter + n
         return nBytes
     
-    def __hexlify(self, data):
-        a = []
-        for x in data:
-            a.append("%02X" % (ord(x)))
-        return ''.join(a)
-    
-    def __unhexelify(self, data):
-        a = []
-        for i in range(0, len(data), 2):
-            a.append(chr(int(data[i:i + 2], 16)))   
-        return ''.join(a) 
-    
     def __init(self):
         self.__state = self.READING_FIXED_HEADER_FIRST
         self.__remainingLength = 0
@@ -1482,7 +1470,7 @@ class MqttEncoder:
         elif msgType in [MqttClient.PINGREQ, MqttClient.PINGRESP, MqttClient.DISCONNECT]:
             return self.__encodeFixedHeaderOnlyMsg(mqttMessage)
         else:
-            raise MqttEncoderError('MqttEncoder: Unknown message type.%s' %self.__hexlify(msgType))
+            raise MqttEncoderError('MqttEncoder: Unknown message type.%s' %HexEcoderDecoder.hexlify(msgType))
     
     def __encodeConnectMsg(self, mqttConnectMessage):
         if(isinstance(mqttConnectMessage, MqttConnectMsg)):
@@ -1651,12 +1639,6 @@ class MqttEncoder:
         length = len(clientId)
         return length >= 1 and length <= 23
     
-    def __hexlify(self, data):
-        a = []
-        for x in data:
-            a.append("%02X" % (ord(x)))
-        return ''.join(a)
-        
 class MqttFixedHeader:
     def __init__(self, messageType=None, qos=0, dup=0, retain=0, remainingLength=0):
         self.messageType = messageType or None
@@ -2349,11 +2331,6 @@ class Socket:
             if(ss == 3):
                 if(bufsize > 1500 or bufsize < 0):bufsize = 1500
                 data = self.__at.socketRecv(self._sockno, bufsize, self._timeout + 3, self.__ssl)
-                def __hexlify(data):
-                    a = []
-                    for x in data:
-                        a.append("%02X" % (ord(x)))
-                    return ''.join(a)
                 return data
             else:
                 return ''
@@ -3161,12 +3138,6 @@ class At:
                 break
         return '\r\n'.join(resp[i:len(resp)])
     
-    def __hexlify(self, data):
-        a = []
-        for x in data:
-            a.append("%02X" % (ord(x)))
-        return ''.join(a)
-
     def socketSend(self, connId, data, bytestosend, timeout, ssl=0, multiPart=0):
     # bytestosend(1-1500)
         while(data):
@@ -3217,7 +3188,20 @@ class At:
     
     def socketBase64(self, connId, enc, dec):
         self.sendCmd('#AT#BASE64=%d,%d,%d' % (connId, enc, dec))
-
+        
+class HexEcoderDecoder:
+    @staticmethod
+    def hexlify(data):
+        a = []
+        for x in data:
+            a.append("%02X" % (ord(x)))
+        return ''.join(a)
+    @staticmethod
+    def unhexlify(data):
+        a = []
+        for i in range(0, len(data), 2):
+            a.append(chr(int(data[i:i + 2], 16)))   
+        return ''.join(a) 
 
 #####Exceptions######################################################################## 
     
