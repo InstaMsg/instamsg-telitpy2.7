@@ -52,7 +52,7 @@ class InstaMsg:
         if(not callable(disConnectHandler)): raise ValueError('disConnectHandler should be a callable object.')
         if(not callable(oneToOneMessageHandler)): raise ValueError('oneToOneMessageHandler should be a callable object.')
         if(clientId): 
-            if(len(clientId) != 36): raise ValueError('clientId is not a valid uuid e.g. cbf7d550-7204-11e4-a2ad-543530e3bc65')
+            if(len(clientId) != 36): raise ValueError('clientId: %s is not a valid uuid e.g. cbf7d550-7204-11e4-a2ad-543530e3bc65')% clientId
         self.__clientId = clientId
         self.__authKey = authKey 
         self.__smsConfigured = 0
@@ -101,7 +101,7 @@ class InstaMsg:
             self.__metadataTopic = "instamsg/client/metadata"
             self.__sessionTopic = "instamsg/client/session"
             self.__configServerToClientTopic = "instamsg/clients/%s/config/serverToClient" % clientId
-            self.__configClientToServerTopic = "instamsg/client/config/clientToServer" % clientId
+            self.__configClientToServerTopic = "instamsg/client/config/clientToServer"
         
     def __initOptions(self, options):
         if(self.__options.has_key('enableSocket')):
@@ -216,7 +216,7 @@ class InstaMsg:
             self.publish(self.__serverLogsTopic, message, 1)
         else:
             try:
-                print "[%s]%s" % (INSTAMSG_LOG_LEVEL[level], message)
+                print "[%s]%s\r\n" % (INSTAMSG_LOG_LEVEL[level], message)
             except:
                 pass
             
@@ -228,9 +228,9 @@ class InstaMsg:
                 k=str(key)
                 v=configs[key]
                 if(isinstance(v,str)):
-                   configArray.append('{"key":"%s","val":"%s"}' %(str(k),str(v)))
+                   configArray.append('{"key":"%s","val":"%s","type":"0","desc":""}' %(str(k),str(v)))
                 else:
-                   configArray.append('{"key":"%s","val":%s}' %(str(k),str(v))) 
+                   configArray.append('{"key":"%s","val":%s,"type":"1","desc":""}' %(str(k),str(v))) 
                 def _resultHandler(result):
                     if(result.failed()):
                         if(callable(resultHandler)):resultHandler(Result(configs,0,result.cause()))  
@@ -238,12 +238,12 @@ class InstaMsg:
                     else:
                         if(callable(resultHandler)):resultHandler(Result(configs,1))
                         self.log(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsg]::Error publishing Config to server: %s" %str(result.cause()))  
-            message = str(configArray)
-            self.publish(self.self.__configClientToServerTopic, message, qos=INSTAMSG_QOS1, dup=0, resultHandler=_resultHandler)
-        except:
-            pass
+            message = "[%s]" % ",".join(configArray)
+            message = message.replace("\'", '"')
+            self.publish(self.__configClientToServerTopic, message, qos=INSTAMSG_QOS1, dup=0, resultHandler=_resultHandler)
+        except Exception, e:
+            self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientConfigError, method = send][%s]:: %s" % (e.__class__.__name__ , str(e)))
             
-    
     def _send(self, messageId, clienId, msg, qos, dup, replyHandler, timeout):
         try:
             if(replyHandler):
@@ -268,17 +268,15 @@ class InstaMsg:
             messageId = time.time()
         return messageId;
     
-    
     def __provision(self):
         try:
             provisioningData = {}
             if(self.__provisioningState == PROVISIONIG_STARTED):
-#                if(not self.__smsConfigured):
-#                    at.setSmsMode()
-#                    at.setSmsMsgFormat(1)
-#                    self.__smsConfigured = 1
-#                smses = at.getSmses(1,4)
-                smses = ['{"sg_pass":"","sg_pin":"","sg_apn":"airtelgprs.com","sg_user":"","prov_pin":"359785020113018"}']
+                if(not self.__smsConfigured):
+                    at.setSmsMode()
+                    at.setSmsMsgFormat(1)
+                    self.__smsConfigured = 1
+                smses = at.getSmses(1,4)
                 dataKeys = ['sg_pass', 'sg_pin', 'sg_apn', 'sg_user', 'prov_pin']
                 for sms in smses:
                     sms = "".join(sms.split())
@@ -340,7 +338,7 @@ class InstaMsg:
           'logLevel':instamsg.INSTAMSG_LOG_LEVEL_DEBUG
           }
         def _handleModemDebugMessages(level, msg):
-            print "[%s]%s" % (instamsg.INSTAMSG_LOG_LEVEL[level], msg)
+            print "[%s]%s\r\n" % (instamsg.INSTAMSG_LOG_LEVEL[level], msg)
         return Modem(modemSettings, _handleModemDebugMessages)
             
         
@@ -365,8 +363,8 @@ class InstaMsg:
         def _resultHandler(result):
             self.log(INSTAMSG_LOG_LEVEL_INFO,"Subscribed to topic %s " % (self.__enableServerLoggingTopic))
         self.subscribe(self.__enableServerLoggingTopic, 1, self.__enableServerLogging, _resultHandler)
-        self.__sendClientMetadata()
-        self.__sendClientSessionData()
+        #self.__sendClientMetadata()
+        #self.__sendClientSessionData()
         if(self.__onConnectCallBack): self.__onConnectCallBack(self)  
         
     def __sendClientSessionData(self):
@@ -389,7 +387,7 @@ class InstaMsg:
                 self.log(level, msg)
             else:
                 try:
-                    print "[%s]%s" % (INSTAMSG_LOG_LEVEL[level], msg)
+                    print "[%s]%s\r\n" % (INSTAMSG_LOG_LEVEL[level], msg)
                 except:
                     pass
     
@@ -1212,7 +1210,7 @@ class MqttClient:
             if(self.__sock is not None):
                 self.__closeSocket()
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[MqttClient]:: Opening socket to %s:%s' % (self.host, str(self.port)))
-            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at, self.TCP_KEEP_ALIVE, self.sslEnabled)
+            self.__sock = Socket(self.MQTT_SOCKET_TIMEOUT, at, self.TCP_KEEP_ALIVE, self.sslEnabled, encoding=1)
             self.__sock.connect((self.host, self.port))
             self.__sockInit = 1
             self.__waitingReconnect = 0
@@ -2226,7 +2224,7 @@ class Socket:
     socketStates[4] = "Socket listening."
     socketStates[5] = "Socket with an incoming connection. Waiting for the accept or shutdown command."
     
-    def __init__(self, timeout, at, keepAlive=default_keep_alive, ssl=0):
+    def __init__(self, timeout, at, keepAlive=default_keep_alive, ssl=0, encoding = 0):
         if(keepAlive < 0 or keepAlive > 240): raise ValueError("Keep alive should be between 0-240")
         self._timeout = timeout or 10  # sec
         self._keepAlive = keepAlive 
@@ -2235,6 +2233,7 @@ class Socket:
         self.connected = 0
         self.__at = at
         self.__ssl = ssl
+        self.__encoding = encoding
         if(ssl):
             self.maxconn = 1
             self._sockno = 1
@@ -2268,7 +2267,7 @@ class Socket:
         try:
             self._sockno = self.__get_socketno()
             if(self._sockno):
-                self.__at.configureSocket(connId=self._sockno, ssl=self.__ssl, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp, timeout=self._timeout+2)
+                self.__at.configureSocket(connId=self._sockno, ssl=self.__ssl, pktSz=512, connTo=self._timeout * 10, keepAlive=self._keepAlive, listenAutoRsp=self._listenAutoRsp, timeout=self._timeout+2, encoding=self.__encoding)
             else:
                 raise SocketMaxCountError('All sockets in use. Total number of socket cannot exceed %d.' % self.maxconn)
         except Exception, e:
@@ -3123,7 +3122,7 @@ class At:
         if (self.sendCmd('AT#SSLS=1').find('#SSLEN: 1,1') >= 0):
             self.sendCmd('AT#SSLSECCFG=%d,%d,%d' % (connId, cipherSuite, authMode))
  
-    def configureSocket(self, connId, ssl=0, cid=1, pktSz=512, maxTo=0, connTo=600, txTo=50, keepAlive=0, listenAutoRsp=0, timeout=62):
+    def configureSocket(self, connId, ssl=0, cid=1, pktSz=512, maxTo=0, connTo=600, txTo=50, keepAlive=0, listenAutoRsp=0, timeout=62, encoding=0):
     # connId(1-6),cid(0-5),pktSz(0-1500),maxTo(0-65535),connTo(10-1200),txTo(0-255)
     # keepAlive(0 – 240)min
         if(ssl):
@@ -3131,7 +3130,7 @@ class At:
                 self.sendCmd('AT#SSLCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo),timeout)
         else:
             self.sendCmd('AT#SCFG=%d,%d,%d,%d,%d,%d' % (connId, cid, pktSz, maxTo, connTo, txTo),timeout)
-        self.sendCmd('AT#SCFGEXT= %d,0,1,%d,%d' % (connId, keepAlive, listenAutoRsp),timeout)
+        self.sendCmd('AT#SCFGEXT= %d,0,%d,%d,%d' % (connId, encoding, keepAlive, listenAutoRsp),timeout)
         
     def connectSocket(self, connId, addr, ssl=0, proto=0, closureType=0, IPort=0, timeout=60):
         connMode = 1  # always connect in command mode
