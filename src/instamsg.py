@@ -41,11 +41,11 @@ class InstaMsg:
     INSTAMSG_HTTP_HOST = "test.instamsg.io"
     INSTAMSG_HTTP_PORT = 80
     INSTAMSG_HTTPS_PORT = 443
-    INSTAMSG_API_VERSION = "beta"
+    INSTAMSG_API_VERSION = "1.0"
     INSTAMSG_RESULT_HANDLER_TIMEOUT = 10    
     INSTAMSG_MSG_REPLY_HANDLER_TIMEOUT = 10
     # InstaMsg Versions // Update every time when some changes happened in this file.
-    INSTAMSG_VERSION = "1.00.00"
+    INSTAMSG_VERSION = "1.01.00"
     
     def __init__(self, clientId, authKey, connectHandler, disConnectHandler, oneToOneMessageHandler, options={}):
         if(not callable(connectHandler)): raise ValueError('connectHandler should be a callable object.')
@@ -72,7 +72,8 @@ class InstaMsg:
         if( not options.has_key('onProvisionCallback')): options['onProvisionCallback'] = None
         self.__configHandler = options['configHandler']
         self.__onProvisionCallBack = options['onProvisionCallback']
-        self.__init(clientId)
+        self.__authHash = None
+        self.__init(clientId, authKey)
         self.__logsListener = []
         self.__defaultReplyTimeout = self.INSTAMSG_RESULT_HANDLER_TIMEOUT
         self.__msgHandlers = {}
@@ -91,17 +92,19 @@ class InstaMsg:
                 time.sleep(5)
                 self.__mqttClient.connect()
                 
-    def __init(self, clientId):
-        if (clientId):
+    def __init(self, clientId, authKey):
+        if (clientId and authKey):
+            sha256 = Sha256(authKey + clientId)
+            self.__authHash = sha256.digest()
             self.__filesTopic = "instamsg/clients/%s/files" % clientId
             self.__fileUploadUrl = "/api/%s/clients/%s/files" % (self.INSTAMSG_API_VERSION, clientId)
             self.__enableServerLoggingTopic = "instamsg/clients/%s/enableServerLogging" % clientId
             self.__serverLogsTopic = "instamsg/clients/%s/logs" % clientId
             self.__rebootTopic = "instamsg/clients/%s/reboot" % clientId
-            self.__metadataTopic = "instamsg/client/metadata"
-            self.__sessionTopic = "instamsg/client/session"
+            self.__infoTopic = "instamsg/clients/%s/info" % clientId
+            self.__sessionTopic = "instamsg/clients/%s/session" % clientId
             self.__configServerToClientTopic = "instamsg/clients/%s/config/serverToClient" % clientId
-            self.__configClientToServerTopic = "instamsg/client/config/clientToServer"
+            self.__configClientToServerTopic = "instamsg/clients/%s/config/clientToServer" % clientId
         
     def __initOptions(self, options):
         if(self.__options.has_key('enableSocket')):
@@ -223,23 +226,15 @@ class InstaMsg:
     def publishConfig(self, configs, resultHandler=None):
         if(not self.__provisioned):InstaMsgSendError("Cannot publish config as device not provisioned.")
         try:
-            configArray=[]
-            for key in configs:
-                k=str(key)
-                v=configs[key]
-                if(isinstance(v,str)):
-                   configArray.append('{"key":"%s","val":"%s","type":"0","desc":""}' %(str(k),str(v)))
+            configs["instamsg_version"]="1.0"
+            message = str(configs).replace("\'", '"').replace("'", '"')
+            def _resultHandler(result):
+                if(result.failed()):
+                    if(callable(resultHandler)):resultHandler(Result(configs,0,result.cause()))  
+                    self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Config published to server: %s" %str(configs))  
                 else:
-                   configArray.append('{"key":"%s","val":%s,"type":"1","desc":""}' %(str(k),str(v))) 
-                def _resultHandler(result):
-                    if(result.failed()):
-                        if(callable(resultHandler)):resultHandler(Result(configs,0,result.cause()))  
-                        self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Config published to server: %s" %str(configs))  
-                    else:
-                        if(callable(resultHandler)):resultHandler(Result(configs,1))
-                        self.log(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsg]::Error publishing Config to server: %s" %str(result.cause()))  
-            message = "[%s]" % ",".join(configArray)
-            message = message.replace("\'", '"')
+                    if(callable(resultHandler)):resultHandler(Result(configs,1))
+                    self.log(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsg]::Error publishing Config to server: %s" %str(result.cause()))  
             self.publish(self.__configClientToServerTopic, message, qos=INSTAMSG_QOS1, dup=0, resultHandler=_resultHandler)
         except Exception, e:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientConfigError, method = send][%s]:: %s" % (e.__class__.__name__ , str(e)))
@@ -316,7 +311,7 @@ class InstaMsg:
             provisioningData['client_id'] = provResponse[0]
             provisioningData['auth_token'] = provResponse[1]
             self.__onProvisionCallBack (provisioningData)
-            self.__init(provResponse[0])
+            self.__init(provResponse[0], provResponse[1])
             self.__provisioned, self.__provisioningState = 1 ,PROVISIONING_COMPLETED
             self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Provisioning completed.")
             self.__initMqttClient(provResponse[0],provResponse[1])
@@ -344,7 +339,7 @@ class InstaMsg:
         
     def __enableServerLogging(self, msg):
         if (msg):
-            msgJson = self.__parseJson(msg.body());
+            msgJson = self.__parseJson(msg.payload);
             if (msgJson is not None and (msgJson.has_key('client_id') and (msgJson.has_key('logging')))):
                 clientId = str(msgJson['client_id'])
                 logging = msgJson['logging']
@@ -362,20 +357,19 @@ class InstaMsg:
         self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]:: Client connected to InstaMsg IOT cloud service.")
         def _resultHandler(result):
             self.log(INSTAMSG_LOG_LEVEL_INFO,"Subscribed to topic %s " % (self.__enableServerLoggingTopic))
-        self.subscribe(self.__enableServerLoggingTopic, 1, self.__enableServerLogging, _resultHandler)
-        #self.__sendClientMetadata()
-        #self.__sendClientSessionData()
+        self.__sendClientInfo()
+        self.__sendClientSessionData()
         if(self.__onConnectCallBack): self.__onConnectCallBack(self)  
         
     def __sendClientSessionData(self):
         ipAddress = at.getGPRSAddress(1)
-        session = {'network_interface':"GPRS", 'ip_address':ipAddress}
+        session = {'network_interface':"GPRS"}
         self.publish(self.__sessionTopic, str(session), INSTAMSG_QOS1, 0)
     
-    def __sendClientMetadata(self):
-        metadata = {'imei': at.getIMEI(), 'serial_number': at.getIMEI(), 'model': at.getModel(),
+    def __sendClientInfo(self):
+        info = {'imei': at.getIMEI(), 'serial_number': at.getIMEI(), 'model': at.getModel(),
                     'firmware_version': at.getFirmwareVersion(), 'manufacturer': at.getManufacturerIdentification(), "client_version" : self.INSTAMSG_VERSION}
-        self.publish(self.__metadataTopic, str(metadata), INSTAMSG_QOS1, 0)
+        self.publish(self.__infoTopic, str(info), INSTAMSG_QOS1, 0)
             
     def __onDisConnect(self):
         self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]:: Client disconnected from InstaMsg IOT cloud service.")
@@ -401,6 +395,8 @@ class InstaMsg:
                 self.__handleSystemRebootMessage()
             elif(mqttMsg.topic == self.__configServerToClientTopic):
                 self.__handleConfigMessage(mqttMsg)
+            elif(mqttMsg.topic == self.__enableServerLoggingTopic):
+                self.__enableServerLogging(mqttMsg)
             else:
                 msg = Message(mqttMsg.messageId, mqttMsg.topic, mqttMsg.payload, mqttMsg.fixedHeader.qos, mqttMsg.fixedHeader.dup)
                 msgHandler = self.__msgHandlers.get(mqttMsg.topic)
@@ -411,17 +407,17 @@ class InstaMsg:
                 
     def __handleConfigMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
-        key,value = None,None
-        if(msgJson.has_key('key')):
-            key = msgJson['key']
-        else:
-            raise ValueError("Config message json should have 'key' key.")   
-        if(msgJson.has_key('val')):
-            value = msgJson['val']
-        else: 
-            raise ValueError("Config message json should have a 'val' key.") 
+#        key,value = None,None
+#        if(msgJson.has_key('key')):
+#            key = msgJson['key']
+#        else:
+#            raise ValueError("Config message json should have 'key' key.")   
+#        if(msgJson.has_key('val')):
+#            value = msgJson['val']
+#        else: 
+#            raise ValueError("Config message json should have a 'val' key.") 
         if(callable(self.__configHandler)):
-            self.__configHandler(Result((key,value),1))
+            self.__configHandler(Result((msgJson),1))
         
     
     def __handleFileTransferMessage(self, mqttMsg):
@@ -452,7 +448,7 @@ class InstaMsg:
                     self.publish(replyTopic, msg, qos, dup)
                 elif (method == "GET" and filename):
                     httpClient = HTTPClient(self.INSTAMSG_HTTP_HOST, self.__httpPort)
-                    httpResponse = httpClient.uploadFile(self.__fileUploadUrl, filename, headers={"Authorization":self.__authKey, "ClientId":self.__clientId})
+                    httpResponse = httpClient.uploadFile(self.__fileUploadUrl, filename, headers={"Client-Authorization":self.__authHash, "ClientId":self.__clientId})
                     if(httpResponse and httpResponse.status == 200):
                         msg = '{"response_id": "%s", "status": 1, "url":"%s"}' % (messageId, httpResponse.body)
                     else:
@@ -740,17 +736,25 @@ class MqttClient:
         self.__onProvisionResultHandler = None
         self.__msgIdInbox = []
         self.__resultHandlers = {}  # {handlerId:{time:122334,handler:replyHandler, timeout:10, timeOutMsg:"Timed out"}}
-        self.__NETWORK_DATA_TOPIC = "instamsg/client/signalinfo"
-        self.__CPU_INFO_TOPIC = "instamsg/client/cpu"
         self.__signalInfoPublishTimer = time.time()
         self.__lastConnectTime = time.time()
         self.__socketErrorCount = 0
         self.__socketRecvErrorCount = 0
         self.__connectAckTimeoutCount = 0
+        self.__initTopics()
     
     def setOptions(self,options): 
-        self.options = options   
-    
+        self.options = options
+        self.__initTopics()
+        
+    def __initTopics(self):
+        if (self.options['clientId']):
+            self.__NETWORK_DATA_TOPIC = "instamsg/clients/%s/signalinfo" % self.options['clientId'] 
+            self.__CPU_INFO_TOPIC = "instamsg/clients/%s/cpu" % self.options['clientId'] 
+        else :
+            self.__NETWORK_DATA_TOPIC = "instamsg/client/signalinfo"
+            self.__CPU_INFO_TOPIC = "instamsg/client/cpu"
+        
     def process(self):
         try:
             if(not self.__disconnecting):
@@ -3202,6 +3206,265 @@ class HexEcoderDecoder:
         for i in range(0, len(data), 2):
             a.append(chr(int(data[i:i + 2], 16)))   
         return ''.join(a) 
+    
+class Sha256(object):
+    SHA_BLOCKSIZE = 64
+    SHA_DIGESTSIZE = 32
+    digest_size = digestsize = SHA_DIGESTSIZE
+    block_size = SHA_BLOCKSIZE
+    ROR = lambda self, x, y: (((x & 0xffffffff) >> (y & 31)) | (x << (32 - (y & 31)))) & 0xffffffff
+    Ch = lambda self, x, y, z: (z ^ (x & (y ^ z)))
+    Maj = lambda self, x, y, z: (((x | y) & z) | (x & y))
+    S = lambda self, x, n: self.ROR(x, n)
+    R = lambda self, x, n: (x & 0xffffffff) >> n
+    Sigma0 = lambda self, x: (self.S(x, 2) ^ self.S(x, 13) ^ self.S(x, 22))
+    Sigma1 = lambda self, x: (self.S(x, 6) ^ self.S(x, 11) ^ self.S(x, 25))
+    Gamma0 = lambda self, x: (self.S(x, 7) ^ self.S(x, 18) ^ self.R(x, 3))
+    Gamma1 = lambda self, x: (self.S(x, 17) ^ self.S(x, 19) ^ self.R(x, 10))
+
+    def __init__(self, s=None):
+        self._sha = self.sha_init()
+        if s:
+            self.sha_update(self._sha, self.getbuf(s))
+    
+    def update(self, s):
+        self.sha_update(self._sha, self.getbuf(s))
+    
+    def digest(self):
+        return self.sha_final(self._sha.copy())[:self._sha['digestsize']]
+    
+    def hexdigest(self):
+        return ''.join(['%.2x' % ord(i) for i in self.digest()])
+
+    def copy(self):
+        new = Sha256.__new__(Sha256)
+        new._sha = self._sha.copy()
+        return new
+    
+    def new_shaobject(self):
+        return {
+            'digest': [0]*8,
+            'count_lo': 0,
+            'count_hi': 0,
+            'data': [0]* self.SHA_BLOCKSIZE,
+            'local': 0,
+            'digestsize': 0
+        }
+    
+    def sha_transform(self, sha_info):
+        W = []
+        
+        d = sha_info['data']
+        for i in xrange(0,16):
+            W.append( (d[4*i]<<24) + (d[4*i+1]<<16) + (d[4*i+2]<<8) + d[4*i+3])
+        
+        for i in xrange(16,64):
+            W.append( (self.Gamma1(W[i - 2]) + W[i - 7] + self.Gamma0(W[i - 15]) + W[i - 16]) & 0xffffffff )
+        
+        ss = sha_info['digest'][:]
+        
+        def RND(a,b,c,d,e,f,g,h,i,ki):
+            t0 = h + self.Sigma1(e) + self.Ch(e, f, g) + ki + W[i];
+            t1 = self.Sigma0(a) + self.Maj(a, b, c);
+            d += t0;
+            h  = t0 + t1;
+            return d & 0xffffffff, h & 0xffffffff
+        
+        ss[3], ss[7] = RND(ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],0,0x428a2f98);
+        ss[2], ss[6] = RND(ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],1,0x71374491);
+        ss[1], ss[5] = RND(ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],2,0xb5c0fbcf);
+        ss[0], ss[4] = RND(ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],3,0xe9b5dba5);
+        ss[7], ss[3] = RND(ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],4,0x3956c25b);
+        ss[6], ss[2] = RND(ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],5,0x59f111f1);
+        ss[5], ss[1] = RND(ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],6,0x923f82a4);
+        ss[4], ss[0] = RND(ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],7,0xab1c5ed5);
+        ss[3], ss[7] = RND(ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],8,0xd807aa98);
+        ss[2], ss[6] = RND(ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],9,0x12835b01);
+        ss[1], ss[5] = RND(ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],10,0x243185be);
+        ss[0], ss[4] = RND(ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],11,0x550c7dc3);
+        ss[7], ss[3] = RND(ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],12,0x72be5d74);
+        ss[6], ss[2] = RND(ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],13,0x80deb1fe);
+        ss[5], ss[1] = RND(ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],14,0x9bdc06a7);
+        ss[4], ss[0] = RND(ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],15,0xc19bf174);
+        ss[3], ss[7] = RND(ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],16,0xe49b69c1);
+        ss[2], ss[6] = RND(ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],17,0xefbe4786);
+        ss[1], ss[5] = RND(ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],18,0x0fc19dc6);
+        ss[0], ss[4] = RND(ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],19,0x240ca1cc);
+        ss[7], ss[3] = RND(ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],20,0x2de92c6f);
+        ss[6], ss[2] = RND(ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],21,0x4a7484aa);
+        ss[5], ss[1] = RND(ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],22,0x5cb0a9dc);
+        ss[4], ss[0] = RND(ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],23,0x76f988da);
+        ss[3], ss[7] = RND(ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],24,0x983e5152);
+        ss[2], ss[6] = RND(ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],25,0xa831c66d);
+        ss[1], ss[5] = RND(ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],26,0xb00327c8);
+        ss[0], ss[4] = RND(ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],27,0xbf597fc7);
+        ss[7], ss[3] = RND(ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],28,0xc6e00bf3);
+        ss[6], ss[2] = RND(ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],29,0xd5a79147);
+        ss[5], ss[1] = RND(ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],30,0x06ca6351);
+        ss[4], ss[0] = RND(ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],31,0x14292967);
+        ss[3], ss[7] = RND(ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],32,0x27b70a85);
+        ss[2], ss[6] = RND(ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],33,0x2e1b2138);
+        ss[1], ss[5] = RND(ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],34,0x4d2c6dfc);
+        ss[0], ss[4] = RND(ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],35,0x53380d13);
+        ss[7], ss[3] = RND(ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],36,0x650a7354);
+        ss[6], ss[2] = RND(ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],37,0x766a0abb);
+        ss[5], ss[1] = RND(ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],38,0x81c2c92e);
+        ss[4], ss[0] = RND(ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],39,0x92722c85);
+        ss[3], ss[7] = RND(ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],40,0xa2bfe8a1);
+        ss[2], ss[6] = RND(ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],41,0xa81a664b);
+        ss[1], ss[5] = RND(ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],42,0xc24b8b70);
+        ss[0], ss[4] = RND(ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],43,0xc76c51a3);
+        ss[7], ss[3] = RND(ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],44,0xd192e819);
+        ss[6], ss[2] = RND(ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],45,0xd6990624);
+        ss[5], ss[1] = RND(ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],46,0xf40e3585);
+        ss[4], ss[0] = RND(ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],47,0x106aa070);
+        ss[3], ss[7] = RND(ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],48,0x19a4c116);
+        ss[2], ss[6] = RND(ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],49,0x1e376c08);
+        ss[1], ss[5] = RND(ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],50,0x2748774c);
+        ss[0], ss[4] = RND(ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],51,0x34b0bcb5);
+        ss[7], ss[3] = RND(ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],52,0x391c0cb3);
+        ss[6], ss[2] = RND(ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],53,0x4ed8aa4a);
+        ss[5], ss[1] = RND(ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],54,0x5b9cca4f);
+        ss[4], ss[0] = RND(ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],55,0x682e6ff3);
+        ss[3], ss[7] = RND(ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],56,0x748f82ee);
+        ss[2], ss[6] = RND(ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],57,0x78a5636f);
+        ss[1], ss[5] = RND(ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],ss[5],58,0x84c87814);
+        ss[0], ss[4] = RND(ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],ss[4],59,0x8cc70208);
+        ss[7], ss[3] = RND(ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],ss[3],60,0x90befffa);
+        ss[6], ss[2] = RND(ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],ss[2],61,0xa4506ceb);
+        ss[5], ss[1] = RND(ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],ss[1],62,0xbef9a3f7);
+        ss[4], ss[0] = RND(ss[1],ss[2],ss[3],ss[4],ss[5],ss[6],ss[7],ss[0],63,0xc67178f2);
+        
+        dig = []
+        for i, x in enumerate(sha_info['digest']):
+            dig.append( (x + ss[i]) & 0xffffffff )
+        sha_info['digest'] = dig
+    
+    def sha_init(self):
+        sha_info = self.new_shaobject()
+        sha_info['digest'] = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
+        sha_info['count_lo'] = 0
+        sha_info['count_hi'] = 0
+        sha_info['local'] = 0
+        sha_info['digestsize'] = 32
+        return sha_info
+    
+    def getbuf(self, s):
+        if isinstance(s, str):
+            return s
+        elif isinstance(s, unicode):
+            return str(s)
+        else:
+            return buffer(s)
+    
+    def sha_update(self, sha_info, buffer):
+        count = len(buffer)
+        buffer_idx = 0
+        clo = (sha_info['count_lo'] + (count << 3)) & 0xffffffff
+        if clo < sha_info['count_lo']:
+            sha_info['count_hi'] += 1
+        sha_info['count_lo'] = clo
+        
+        sha_info['count_hi'] += (count >> 29)
+        
+        if sha_info['local']:
+            i = self.SHA_BLOCKSIZE - sha_info['local']
+            if i > count:
+                i = count
+            
+            # copy buffer
+            for x in enumerate(buffer[buffer_idx:buffer_idx+i]):
+                sha_info['data'][sha_info['local']+x[0]] = self.unpack(x[1])
+            
+            count -= i
+            buffer_idx += i
+            
+            sha_info['local'] += i
+            if sha_info['local'] == self.SHA_BLOCKSIZE:
+                self.sha_transform(sha_info)
+                sha_info['local'] = 0
+            else:
+                return
+        
+        while count >= self.SHA_BLOCKSIZE:
+            # copy buffer
+            sha_info['data'] = [self.unpack(c) for c in buffer[buffer_idx:buffer_idx + self.SHA_BLOCKSIZE]]
+            count -= self.SHA_BLOCKSIZE
+            buffer_idx += self.SHA_BLOCKSIZE
+            self.sha_transform(sha_info)
+            
+        
+        # copy buffer
+        pos = sha_info['local']
+        sha_info['data'][pos:pos+count] = [self.unpack(c) for c in buffer[buffer_idx:buffer_idx + count]]
+        sha_info['local'] = count
+    
+    def sha_final(self, sha_info):
+        lo_bit_count = sha_info['count_lo']
+        hi_bit_count = sha_info['count_hi']
+        count = (lo_bit_count >> 3) & 0x3f
+        sha_info['data'][count] = 0x80;
+        count += 1
+        if count > self.SHA_BLOCKSIZE - 8:
+            # zero the bytes in data after the count
+            sha_info['data'] = sha_info['data'][:count] + ([0] * (self.SHA_BLOCKSIZE - count))
+            self.sha_transform(sha_info)
+            # zero bytes in data
+            sha_info['data'] = [0] * self.SHA_BLOCKSIZE
+        else:
+            sha_info['data'] = sha_info['data'][:count] + ([0] * (self.SHA_BLOCKSIZE - count))
+        
+        sha_info['data'][56] = (hi_bit_count >> 24) & 0xff
+        sha_info['data'][57] = (hi_bit_count >> 16) & 0xff
+        sha_info['data'][58] = (hi_bit_count >>  8) & 0xff
+        sha_info['data'][59] = (hi_bit_count >>  0) & 0xff
+        sha_info['data'][60] = (lo_bit_count >> 24) & 0xff
+        sha_info['data'][61] = (lo_bit_count >> 16) & 0xff
+        sha_info['data'][62] = (lo_bit_count >>  8) & 0xff
+        sha_info['data'][63] = (lo_bit_count >>  0) & 0xff
+        
+        self.sha_transform(sha_info)
+        
+        dig = []
+        for i in sha_info['digest']:
+            dig.extend([ ((i>>24) & 0xff), ((i>>16) & 0xff), ((i>>8) & 0xff), (i & 0xff) ])
+        return ''.join([chr(i) for i in dig])
+    
+    def unpack(self, s):
+        return ord(s)
+    
+    def test(self):
+        a_str = "just a test string"
+        assert 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' == Sha256().hexdigest()
+        assert 'd7b553c6f09ac85d142415f857c5310f3bbbe7cdd787cce4b985acedd585266f' == Sha256(a_str).hexdigest()
+        assert '8113ebf33c97daa9998762aacafe750c7cefc2b2f173c90c59663a57fe626f21' == Sha256(a_str*7).hexdigest()
+        
+        s = Sha256(a_str)
+        s.update(a_str)
+        assert '03d9963e05a094593190b6fc794cb1a3e1ac7d7883f0b5855268afeccc70d461' == s.hexdigest()
+
+
+class Sha224(Sha256):
+    digest_size = digestsize = 28
+
+    def __init__(self, s=None):
+        self._sha = self.sha224_init()
+        if s:
+            self.sha_update(self._sha, self.getbuf(s))
+
+    def copy(self):
+        new = Sha224.__new__(Sha224)
+        new._sha = self._sha.copy()
+        return new
+    
+    def sha224_init(self):
+        sha_info = self.new_shaobject()
+        sha_info['digest'] = [0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4]
+        sha_info['count_lo'] = 0
+        sha_info['count_hi'] = 0
+        sha_info['local'] = 0
+        sha_info['digestsize'] = 28
+        return sha_info
 
 #####Exceptions######################################################################## 
     
