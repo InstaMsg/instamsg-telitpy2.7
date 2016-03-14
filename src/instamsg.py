@@ -30,6 +30,7 @@ PROVISIONIG_STARTED = 0
 PROVISIONIG_SMS_READ = 1
 PROVISIONIG_MSG_SENT = 2
 PROVISIONING_COMPLETED = 3
+NETWORK_INFO_PUBLISH_INTERVAL = 300
 
 class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
@@ -81,6 +82,7 @@ class InstaMsg:
         self.__sslEnabled = 0
         self.__initOptions(options)
         self.__mqttClient = None
+        self.__networkInfoPublishTimer = time.time()
         if(self.__enableTcp):
             mqttoptions = self.__mqttClientOptions(clientId, authKey, self.__keepAliveTimer, self.__sslEnabled)
             self.__mqttClient = MqttClient(self.INSTAMSG_HOST, self.__port, mqttoptions)
@@ -94,8 +96,8 @@ class InstaMsg:
                 
     def __init(self, clientId, authKey):
         if (clientId and authKey):
-            sha256 = Sha256(authKey + clientId)
-            self.__authHash = sha256.digest()
+            sha256 = Sha256(clientId + authKey)
+            self.__authHash = sha256.hexdigest()
             self.__filesTopic = "instamsg/clients/%s/files" % clientId
             self.__fileUploadUrl = "/api/%s/clients/%s/files" % (self.INSTAMSG_API_VERSION, clientId)
             self.__enableServerLoggingTopic = "instamsg/clients/%s/enableServerLogging" % clientId
@@ -105,7 +107,8 @@ class InstaMsg:
             self.__sessionTopic = "instamsg/clients/%s/session" % clientId
             self.__configServerToClientTopic = "instamsg/clients/%s/config/serverToClient" % clientId
             self.__configClientToServerTopic = "instamsg/clients/%s/config/clientToServer" % clientId
-        
+            self.__networkInfoTopic = "instamsg/clients/%s/network" % clientId
+
     def __initOptions(self, options):
         if(self.__options.has_key('enableSocket')):
             self.__enableTcp = options.get('enableSocket')
@@ -140,6 +143,7 @@ class InstaMsg:
             if(self.__mqttClient):
                 self.__mqttClient.process()
                 self.__processHandlersTimeout()
+                self.__publishNetworkStrengthInfo()
         except Exception, e:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
                     
@@ -265,15 +269,15 @@ class InstaMsg:
     
     def __provision(self):
         try:
-            provisioningData = {}
             if(self.__provisioningState == PROVISIONIG_STARTED):
                 if(not self.__smsConfigured):
                     at.setSmsMode()
                     at.setSmsMsgFormat(1)
                     self.__smsConfigured = 1
                 smses = at.getSmses(1,4)
-                dataKeys = ['sg_pass', 'sg_pin', 'sg_apn', 'sg_user', 'prov_pin']
+                dataKeys = ['time', 'sg_pass', 'sg_pin', 'sg_apn', 'sg_user', 'prov_pin']
                 for sms in smses:
+                    provisioningData = {}
                     sms = "".join(sms.split())
                     for dataKey in dataKeys:
                         s='"%s":"' % dataKey
@@ -281,25 +285,27 @@ class InstaMsg:
                             a=sms.find(s)+len(s)
                             b=sms.find('","',a)
                             if(b==-1): b = -2
-                            provisioningData[dataKey]=sms[a:b]
+                            value = sms[a:b]
+                            if(dataKey == "time"):
+                                value = long(value)
+                            provisioningData[dataKey]=value
                         else:break
                     if(len(provisioningData) == len(dataKeys)):
-                        self.__provisioningData = provisioningData
-                        self.__provisioningState = PROVISIONIG_SMS_READ
+                        if(not self.__provisioningData or (provisioningData["time"] > self.__provisioningData["time"])):
+                            self.__provisioningData = provisioningData
+                            self.__provisioningState = PROVISIONIG_SMS_READ
                         self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Provisioning sms read: %s" % sms)
-                        break
                     elif(provisioningData):
                         self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Incomplete provisioning sms received: %s" %sms)
-            if(not provisioningData):
+            if(not self.__provisioningData):
                 self.log(INSTAMSG_LOG_LEVEL_INFO, "No provisioning sms read.")
             if(self.__provisioningData  and self.__provisioningState == PROVISIONIG_SMS_READ):
+                self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Processing provisioning sms data: %s" % str(self.__provisioningData))
                 self.__provisioningState = PROVISIONIG_MSG_SENT
                 self.__sendProvisioningMsg(self.__provisioningData)
         except Exception, e:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
                     
-            
-            
     def __sendProvisioningMsg(self,provisioningData):
         if(not self.__modem):
             self.__modem = self.__initializeModem(provisioningData)
@@ -407,19 +413,9 @@ class InstaMsg:
                 
     def __handleConfigMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
-#        key,value = None,None
-#        if(msgJson.has_key('key')):
-#            key = msgJson['key']
-#        else:
-#            raise ValueError("Config message json should have 'key' key.")   
-#        if(msgJson.has_key('val')):
-#            value = msgJson['val']
-#        else: 
-#            raise ValueError("Config message json should have a 'val' key.") 
         if(callable(self.__configHandler)):
             self.__configHandler(Result((msgJson),1))
         
-    
     def __handleFileTransferMessage(self, mqttMsg):
         msgJson = self.__parseJson(mqttMsg.payload)
         qos, dup = mqttMsg.fixedHeader.qos, mqttMsg.fixedHeader.dup
@@ -571,9 +567,6 @@ class InstaMsg:
         options['sslEnabled'] = sslEnabled
         return options
     
-    def __parseJson(self, jsonString):
-        return eval(jsonString)  # Hack as not implemented Json Library
-    
     def __processHandlersTimeout(self): 
         for key, value in self.__sendMsgReplyHandlers.items():
             if((time.time() - value['time']) >= value['timeout']):
@@ -583,6 +576,22 @@ class InstaMsg:
                     resultHandler(Result(None, 0, (INSTAMSG_ERROR_TIMEOUT, timeOutMsg)))
                     value['handler'] = None
                 del self.__sendMsgReplyHandlers[key]
+                
+    def __publishNetworkStrengthInfo(self):
+        if(self.__networkInfoPublishTimer - time.time() <= 0):
+            signalInfo = {'antenna_status': at.getAntennaStatus(), 'signal_strength': str(self.__getSignalStrength())}
+            self.__networkInfoPublishTimer = self.__networkInfoPublishTimer + NETWORK_INFO_PUBLISH_INTERVAL
+            self.publish(self.__networkInfoTopic, str(signalInfo), INSTAMSG_QOS0, 0)
+            
+    def __getSignalStrength(self):
+        try:
+            quality = self.__parseJson(str(at.getSignalQuality()))
+            if (len(quality) > 0):
+                return (-113 + int((2 * int(quality[0]))))
+            else:
+                return -1
+        except:
+            return -1
                 
 class Message:
     def __init__(self, messageId, topic, body, qos=INSTAMSG_QOS0, dup=0, replyTopic=None, instaMsg=None):
@@ -695,7 +704,6 @@ class MqttClient:
     MQTT_QOS1 = 1
     MQTT_QOS2 = 2
     # Extra var
-    SIGNALINFO_PERIODIC_INTERVAL = 300
     CONNECT_ACK_TIMEOUT = 300
     SOCKET_ERROR_COUNT_FOR_REBOOT = 5
     SOCKET_RECV_ERROR_COUNT_FOR_REBOOT =3
@@ -736,24 +744,13 @@ class MqttClient:
         self.__onProvisionResultHandler = None
         self.__msgIdInbox = []
         self.__resultHandlers = {}  # {handlerId:{time:122334,handler:replyHandler, timeout:10, timeOutMsg:"Timed out"}}
-        self.__signalInfoPublishTimer = time.time()
         self.__lastConnectTime = time.time()
         self.__socketErrorCount = 0
         self.__socketRecvErrorCount = 0
         self.__connectAckTimeoutCount = 0
-        self.__initTopics()
     
     def setOptions(self,options): 
         self.options = options
-        self.__initTopics()
-        
-    def __initTopics(self):
-        if (self.options['clientId']):
-            self.__NETWORK_DATA_TOPIC = "instamsg/clients/%s/signalinfo" % self.options['clientId'] 
-            self.__CPU_INFO_TOPIC = "instamsg/clients/%s/cpu" % self.options['clientId'] 
-        else :
-            self.__NETWORK_DATA_TOPIC = "instamsg/client/signalinfo"
-            self.__CPU_INFO_TOPIC = "instamsg/client/cpu"
         
     def process(self):
         try:
@@ -769,7 +766,6 @@ class MqttClient:
                                 self.__sendPingReq()
                                 self.__lastPingReqTime = time.time()
                                 self.__lastPingRespTime = None
-                        self.__publishNetworkStrengthInfo()
             self.__processHandlersTimeout()
             if (self.__connecting and ((self.__lastConnectTime + self.CONNECT_ACK_TIMEOUT) < time.time())):
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, "[MqttClientError, method = process]::Connect Ack timed out. Reseting connection.")
@@ -954,16 +950,6 @@ class MqttClient:
         else:
             raise ValueError('Callback should be a callable object.')
     
-    def getSignalStrength(self):
-        try:
-            quality = self.__parseJson(str(at.getSignalQuality()))
-            if (len(quality) > 0):
-                return (-113 + int((2 * int(quality[0]))))
-            else:
-                return -1
-        except:
-            return -1
-
     def __processErrorCount(self, methodName):
             if (self.__socketErrorCount > self.SOCKET_ERROR_COUNT_FOR_REBOOT):
                 self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = %s]:: Rebooting as socket error count exceeded %d" % (methodName, self.SOCKET_ERROR_COUNT_FOR_REBOOT))
@@ -975,17 +961,6 @@ class MqttClient:
     def __parseJson(self, jsonString):
         return eval(jsonString)  # Hack as not implemented Json Library 
           
-    def __publishNetworkStrengthInfo(self):
-        if(self.__signalInfoPublishTimer - time.time() <= 0):
-            signalInfo = {'antenna_status': at.getAntennaStatus(), 'signal_strength': str(self.getSignalStrength())}
-            self.__signalInfoPublishTimer = self.__signalInfoPublishTimer + self.SIGNALINFO_PERIODIC_INTERVAL
-            self.publish(self.__NETWORK_DATA_TOPIC, str(signalInfo), self.MQTT_QOS1, 0)
-            self.__publishCpuAndMemoryInfo()
-            
-    def __publishCpuAndMemoryInfo(self):
-        info = {'cpu_temperature' : str(at.getTemperature()), 'remaining_memory' : str(at.getRemainingMemorySpace())}
-#        self.publish(self.__CPU_INFO_TOPIC, str(info), self.MQTT_QOS1, 0)
-        
     def __validateTopic(self, topic):
         if(topic):
             pass
