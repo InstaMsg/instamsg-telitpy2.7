@@ -235,10 +235,10 @@ class InstaMsg:
             def _resultHandler(result):
                 if(result.failed()):
                     if(callable(resultHandler)):resultHandler(Result(configs,0,result.cause()))  
-                    self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Config published to server: %s" %str(configs))  
+                    self.log(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsg]::Error publishing Config to server: %s" %str(result.cause()))  
                 else:
                     if(callable(resultHandler)):resultHandler(Result(configs,1))
-                    self.log(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsg]::Error publishing Config to server: %s" %str(result.cause()))  
+                    self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Config published to server: %s" %str(configs))  
             self.publish(self.__configClientToServerTopic, message, qos=INSTAMSG_QOS1, dup=0, resultHandler=_resultHandler)
         except Exception, e:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientConfigError, method = send][%s]:: %s" % (e.__class__.__name__ , str(e)))
@@ -270,6 +270,7 @@ class InstaMsg:
     def __provision(self):
         try:
             if(self.__provisioningState == PROVISIONIG_STARTED):
+                self.__provisioningData = {}
                 if(not self.__smsConfigured):
                     at.setSmsMode()
                     at.setSmsMsgFormat(1)
@@ -307,7 +308,7 @@ class InstaMsg:
             self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_ERROR, "[InstaMsgClientError, method = process]- %s" % (str(e)))
                     
     def __sendProvisioningMsg(self,provisioningData):
-        if(not self.__modem):
+        if(not self.__modem or (self.__modem and self.__modem.getState() != Modem.MODEM_STATE_OK)):
             self.__modem = self.__initializeModem(provisioningData)
         provId = self.__modem.imei
         provPin = provisioningData['prov_pin']
@@ -569,7 +570,7 @@ class InstaMsg:
         if(password and len(password) > self.INSTAMSG_MAX_BYTES_IN_MSG): raise ValueError("Password length cannot be more than %d bytes." % self.INSTAMSG_MAX_BYTES_IN_MSG)
         if(keepAliveTimer > 32768 or keepAliveTimer < self.INSTAMSG_KEEP_ALIVE_TIMER): raise ValueError("keepAliveTimer should be between %d and 32768" % self.INSTAMSG_KEEP_ALIVE_TIMER)
         options = {}
-        options['clientId'] = "EMPTY"
+        options['clientId'] = str(at.getIMEI())
         options['hasUserName'] = 1
         options['hasPassword'] = 1
         options['username'] = username
@@ -793,7 +794,7 @@ class MqttClient:
                 self.__initSock()
                 if(self.__sockInit):
                     options = self.options.copy()
-                    options['clientId'] = 'NONE'
+                    options['clientId'] = 'PROVISIONING'
                     options['hasUserName'] = 1
                     if (provPin):
                         options['hasPassword'] = 1
@@ -2405,8 +2406,8 @@ class TimeHelper:
 #####Modem Initialization#########################################################################
 class Modem:
     DEFAULT_NTP_PORT = 23
-    MODEM_STATE_SIM_DETECT = 1
-    MODEM_STATE_SIM_PIN = 2
+    MODEM_STATE_SET_SIM_DETECT = 1
+    MODEM_STATE_SET_SIM_PIN = 2
     MODEM_STATE_INIT_NETWORK = 3
     MODEM_STATE_SET_GPRS_CONTEXT = 4
     MODEM_STATE_OK = 5
@@ -2417,7 +2418,7 @@ class Modem:
             self.__onDebugMessageCallBack = onDebugMessageCallBack
             self.__log(INSTAMSG_LOG_LEVEL_INFO, "[Modem]:: Configuring modem...")
             self.__initOptions(settings)
-            self.state = self.MODEM_STATE_SIM_DETECT
+            self.__state = self.MODEM_STATE_SET_SIM_DETECT
             self.init()
             self.__setPowerMode()
             self.__setFireWall() 
@@ -2434,7 +2435,7 @@ class Modem:
         self.__init()
         
     def getState(self):
-        return self.state
+        return self.__state
     
     def getSignalQuality(self):
         try:
@@ -2445,7 +2446,7 @@ class Modem:
     def settings(self):
         try:
             return {
-                 'state':self.state,
+                 'state':self.__state,
                  'imei':self.imei,
                  'model':self.model,
                  'firmware':self.firmware,
@@ -2523,40 +2524,39 @@ class Modem:
             if(not at.setExtendedErrorCode()): 
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to set extended AT error code.')
             self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing SIM...')
-
-            if (self.state == self.MODEM_STATE_SIM_DETECT):
+            if (self.__state == self.MODEM_STATE_SET_SIM_DETECT):
                 if( not at.initSimDetect(self.simDetectionMode, retry)): 
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize SIM.')
-                    return self.state
+                    return self.__state
                 else:
-                    self.state == self.MODEM_STATE_SIM_PIN
+                    self.__state = self.MODEM_STATE_SET_SIM_PIN
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: SIM Detected.')
-            if (self.state == self.MODEM_STATE_SIM_PIN):
+            if (self.__state == self.MODEM_STATE_SET_SIM_PIN):
                 if(not at.initPin(self.simPin, retry)): 
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to set SIM PIN.')
-                    return self.state
+                    return self.__state
                 else:
-                    self.state == self.MODEM_STATE_INIT_NETWORK
+                    self.__state = self.MODEM_STATE_INIT_NETWORK
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: SIM OK.')
-            if (self.state == self.MODEM_STATE_INIT_NETWORK):
+            if (self.__state == self.MODEM_STATE_INIT_NETWORK):
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing Network...')
                 if(not at.initNetwork(retry)): 
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize Network.')
-                    return self.state
+                    return self.__state
                 else:
-                    self.state == self.MODEM_STATE_SET_GPRS_CONTEXT
+                    self.__state = self.MODEM_STATE_SET_GPRS_CONTEXT
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Network OK.')
-            if (self.state == self.MODEM_STATE_SET_GPRS_CONTEXT):
+            if (self.__state == self.MODEM_STATE_SET_GPRS_CONTEXT):
                 self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing GPRS settings...')
                 if(not at.initGPRS(1, self.gprsApn, self.gprsUserId, self.gprsPwd, retry)): 
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize GPRS context.')
-                    return self.state
+                    return self.__state
                 else:
-                    self.state == MODEM_STATE_OK
+                    self.__state = self.MODEM_STATE_OK
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: GPRS Settings OK.')
                     self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Modem OK.')
-        except:
-            self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[Modem]:: Error configuring modem. Continuing without it...")
+        except Exception, e:
+            self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[Modem]:: Error configuring modem. %s. Continuing without it..." % str(e))
     
     def __setNtp(self):
         try:
@@ -2658,13 +2658,10 @@ class At:
                    response = '%s\r\n' % r[0] + '\r\n'.join(r[3:])
                 return response
         except self.error, e:
-            print ("AtError, command %s failed. %s\r\n" % (cmd, str(e)))
             raise self.error(str(e))
         except self.timeout, e:
-            print ("AtTimeoutError, command %s failed. %s\r\n" % (cmd, str(e)))
             raise self.timeout(str(e))
         except Exception, e:
-            print ("UnexpectedError, command %s failed. %s\r\n" % (cmd, str(e)))
             raise self.error("UnexpectedError, command %s failed. %s" % (cmd, str(e)))
     
     # Module AT commands
@@ -2675,7 +2672,8 @@ class At:
             if(response.find('#SMSMODE: %d' % mode) < 0):
                 self.sendCmd('AT#SMSMODE=%d' % mode,5)
             return 1
-        except:
+        except Exception,e:
+            print "[At:] Error in setSmsMode: %s" % str(e)
             return 0
     
     def setSmsMsgFormat(self,format=1):
@@ -2722,7 +2720,8 @@ class At:
         try:
             self.sendCmd('AT#REBOOT')
             return 1
-        except:
+        except Exception,e:
+            print "[At:] Error in reboot: %s" % str(e)
             return 0
         
     def factoryReset(self):
@@ -2909,13 +2908,13 @@ class At:
         imei = ''
         if(retry <= 0): retry = 1
         while (retry > 0):
-            retry = retry - 1
             try:
+                time.sleep(5)
+                retry = retry - 1
                 imei = self.sendCmd('AT+CGSN').split('\r\n')[1]
                 if(imei): break
-                time.sleep(5)
-            except:
-                time.sleep(5)
+            except Exception,e:
+                print "[At:] Error in getIMEI: %s" % str(e)
                 continue
         return imei
     
@@ -2924,8 +2923,9 @@ class At:
         success = 0
         if(retry <= 0): retry = 1
         while (retry > 0):
-            retry = retry - 1
             try:
+                time.sleep(5)
+                retry = retry - 1
                 response = self.sendCmd('AT#SIMDET?', 5)
                 if (response.find(str(simDetectMode) + ',') > 0):
                     success = 1
@@ -2934,9 +2934,8 @@ class At:
                     self.sendCmd('AT#SIMDET=' + str(simDetectMode) , 5)
                     success = 1
                     break
-                time.sleep(5)
-            except:
-                time.sleep(5)
+            except Exception,e:
+                print "[At:] Error in initSimDetect: %s" % str(e)
                 continue
         return success
     
@@ -2944,8 +2943,9 @@ class At:
         success = 0
         if(retry <= 0): retry = 1
         while (retry > 0):
-            retry = retry - 1
             try:
+                time.sleep(5)
+                retry = retry - 1
                 response = self.sendCmd('AT+CPIN?', 5)
                 if (response.find('READY') > 0):
                     success = 1
@@ -2954,9 +2954,8 @@ class At:
                     self.sendCmd('AT+CPIN=' + pin, 5)
                     success = 1
                     break
-                time.sleep(5)
-            except:
-                time.sleep(5)
+            except Exception,e:
+                print "[At:] Error in initPin: %s" % str(e)
                 continue
         return success
     
@@ -2973,15 +2972,15 @@ class At:
         success = 0
         if(retry <= 0): retry = 1
         while (retry > 0):
-            retry = retry - 1
             try:
+                time.sleep(5)
+                retry = retry - 1
                 response = self.sendCmd('AT+CREG?', 5)
                 if (response.find('+CREG: 0,1') > 0 or response.find('+CREG: 0,5') > 0):
                     success = 1
                     break
-                time.sleep(5)
-            except:
-                time.sleep(5)
+            except Exception,e:
+                print "[At:] Error in initNetwork: %s" % str(e)
                 continue
         return success  
     
@@ -2995,15 +2994,16 @@ class At:
         success = 0
         if(retry <= 0): retry = 1
         while (retry > 0):
-            time.sleep(3)
-            retry = retry - 1
             try:
+                time.sleep(3)
+                retry = retry - 1
                 self.sendCmd('AT+CGDCONT=%d,"IP","%s";#USERID="%s";#PASSW="%s"' % (pdpContextId, apn, userid, passw))    
                 self.sendCmd('AT+CGATT?', 5, '+CGATT: 1')
                 self.setGPRSContextConfig()
                 success = 1
                 break
-            except:
+            except Exception,e:
+                print "[At:] Error in initGPRS: %s" % str(e)
                 continue
         return success  
     
@@ -3013,13 +3013,14 @@ class At:
         if(pdpContextId > 5 or pdpContextId < 1): return 0
         if(retry <= 0): retry = 1
         while (retry > 0):
-            time.sleep(3)
-            retry = retry - 1
             try:
+                time.sleep(3)
+                retry = retry - 1
                 self.sendCmd('AT#SGACT=%d,1' % pdpContextId, 1, 'IP')
                 success = 1
                 break
-            except:
+            except Exception,e:
+                print "[At:] Error in activateGPRSContext: %s" % str(e)
                 continue
         return success  
     
@@ -3029,13 +3030,14 @@ class At:
         if(pdpContextId > 5 or pdpContextId < 1): return 0
         if(retry <= 0): retry = 1
         while (retry > 0):
-            time.sleep(3)
-            retry = retry - 1
             try:
+                time.sleep(3)
+                retry = retry - 1
                 self.sendCmd('AT#SGACT=%d,0' % pdpContextId, 1)
                 success = 1
                 break
-            except:
+            except Exception,e:
+                print "[At:] Error in deactivateGPRSContext: %s" % str(e)
                 continue
         return success 
     
@@ -3050,12 +3052,13 @@ class At:
         status = 0
         if(retry <= 0): retry = 1
         while (retry > 0):
-            time.sleep(3)
-            retry = retry - 1
             try:
+                time.sleep(3)
+                retry = retry - 1
                 if(self.sendCmd('AT#SGACT?', 5).find('#SGACT: %d,1' % pdpContextId) > 0): status = 1
                 break
-            except:
+            except Exception,e:
+                print "[At:] Error in getGPRSContextStatus: %s" % str(e)
                 continue
         return status  
     
@@ -3075,7 +3078,8 @@ class At:
                 drop = 0
                 status = self.getGPRSContextStatus(pdpContextId, 1)
             return status
-        except:
+        except Exception,e:
+            print "[At:] Error in initGPRSConnection: %s" % str(e)
             return 0
         
     def getGPRSAddress(self, connId=1):
