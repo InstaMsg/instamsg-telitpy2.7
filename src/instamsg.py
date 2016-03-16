@@ -36,10 +36,10 @@ class InstaMsg:
     INSTAMSG_MAX_BYTES_IN_MSG = 10240
     INSTAMSG_KEEP_ALIVE_TIMER = 600
     INSTAMSG_RECONNECT_TIMER = 90
-    INSTAMSG_HOST = "test.instamsg.io"
+    INSTAMSG_HOST = "device.instamsg.io"
     INSTAMSG_PORT = 1883
     INSTAMSG_PORT_SSL = 8883
-    INSTAMSG_HTTP_HOST = "test.instamsg.io"
+    INSTAMSG_HTTP_HOST = "platform.instamsg.io"
     INSTAMSG_HTTP_PORT = 80
     INSTAMSG_HTTPS_PORT = 443
     INSTAMSG_API_VERSION = "1.0"
@@ -220,7 +220,7 @@ class InstaMsg:
         
     def log(self, level, message):
         if(self.__enableLogToServer and self.__provisioned):
-            self.publish(self.__serverLogsTopic, message, 1)
+            self.publish(self.__serverLogsTopic, message, 0)
         else:
             try:
                 print "[%s]%s\r\n" % (INSTAMSG_LOG_LEVEL[level], message)
@@ -323,8 +323,8 @@ class InstaMsg:
             self.__initMqttClient(provResponse[0],provResponse[1])
             at.deleteSms(1,4)
         else:
-            self.__provisioningState = PROVISIONIG_SMS_READ
-            self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Provisioning failed.")
+            self.__provisioningState = PROVISIONIG_STARTED
+            self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Provisioning failed. Restarting provisioning...")
             
     def __initMqttClient(self, clientId, authKey):
             mqttoptions = self.__mqttClientOptions(clientId, authKey, self.__keepAliveTimer, self.__sslEnabled)
@@ -363,19 +363,35 @@ class InstaMsg:
         self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]:: Client connected to InstaMsg IOT cloud service.")
         def _resultHandler(result):
             self.log(INSTAMSG_LOG_LEVEL_INFO,"Subscribed to topic %s " % (self.__enableServerLoggingTopic))
-        self.__sendClientInfo()
-        self.__sendClientSessionData()
+        self.__publishClientInfo()
+        self.__publishClientSessionData()
         if(self.__onConnectCallBack): self.__onConnectCallBack(self)  
         
-    def __sendClientSessionData(self):
+    def __publishClientSessionData(self):
         ipAddress = at.getGPRSAddress(1)
-        session = {'network_interface':"GPRS"}
-        self.publish(self.__sessionTopic, str(session), INSTAMSG_QOS1, 0)
+        session = {'network_interface':"GPRS", "instamsg_version" : self.INSTAMSG_VERSION}
+        self.publish(self.__sessionTopic, str(session), INSTAMSG_QOS0, 0)
     
-    def __sendClientInfo(self):
+    def __publishClientInfo(self):
         info = {'imei': at.getIMEI(), 'serial_number': at.getIMEI(), 'model': at.getModel(),
-                    'firmware_version': at.getFirmwareVersion(), 'manufacturer': at.getManufacturerIdentification(), "client_version" : self.INSTAMSG_VERSION}
-        self.publish(self.__infoTopic, str(info), INSTAMSG_QOS1, 0)
+                    'firmware_version': at.getFirmwareVersion(), 'manufacturer': at.getManufacturerIdentification(), "client_version" : self.INSTAMSG_VERSION, "instamsg_version" : self.INSTAMSG_VERSION}
+        self.publish(self.__infoTopic, str(info), INSTAMSG_QOS0, 0)
+        
+    def __publishNetworkStrengthInfo(self):
+        if(self.__networkInfoPublishTimer - time.time() <= 0):
+            networkInfo = {'antenna_status': at.getAntennaStatus(), 'signal_strength': str(self.__getSignalStrength()), "instamsg_version" : self.INSTAMSG_VERSION}
+            self.__networkInfoPublishTimer = self.__networkInfoPublishTimer + NETWORK_INFO_PUBLISH_INTERVAL
+            self.publish(self.__networkInfoTopic, str(networkInfo), INSTAMSG_QOS0, 0)
+            
+    def __getSignalStrength(self):
+        try:
+            quality = self.__parseJson(str(at.getSignalQuality()))
+            if (len(quality) > 0):
+                return (-113 + int((2 * int(quality[0]))))
+            else:
+                return -1
+        except:
+            return -1
             
     def __onDisConnect(self):
         self.__handleDebugMessage(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]:: Client disconnected from InstaMsg IOT cloud service.")
@@ -497,6 +513,9 @@ class InstaMsg:
     def __deleteFile(self, filename):
         posix.unlink(filename)
         
+    def __parseJson(self, jsonString):
+        return eval(jsonString)  # Hack as not implemented Json Library 
+          
     def __handleSystemRebootMessage(self):
         self.log(INSTAMSG_LOG_LEVEL_INFO, "[InstaMsg]::Rebooting device.") 
         at.reboot()
@@ -576,22 +595,6 @@ class InstaMsg:
                     resultHandler(Result(None, 0, (INSTAMSG_ERROR_TIMEOUT, timeOutMsg)))
                     value['handler'] = None
                 del self.__sendMsgReplyHandlers[key]
-                
-    def __publishNetworkStrengthInfo(self):
-        if(self.__networkInfoPublishTimer - time.time() <= 0):
-            signalInfo = {'antenna_status': at.getAntennaStatus(), 'signal_strength': str(self.__getSignalStrength())}
-            self.__networkInfoPublishTimer = self.__networkInfoPublishTimer + NETWORK_INFO_PUBLISH_INTERVAL
-            self.publish(self.__networkInfoTopic, str(signalInfo), INSTAMSG_QOS0, 0)
-            
-    def __getSignalStrength(self):
-        try:
-            quality = self.__parseJson(str(at.getSignalQuality()))
-            if (len(quality) > 0):
-                return (-113 + int((2 * int(quality[0]))))
-            else:
-                return -1
-        except:
-            return -1
                 
 class Message:
     def __init__(self, messageId, topic, body, qos=INSTAMSG_QOS0, dup=0, replyTopic=None, instaMsg=None):
@@ -958,9 +961,6 @@ class MqttClient:
                 self.__log(INSTAMSG_LOG_LEVEL_DEBUG, "[MqttClient, method = %s]:: Rebooting as socket error count exceeded %d" % (methodName, self.SOCKET_RECV_ERROR_COUNT_FOR_REBOOT))
                 at.reboot()
                         
-    def __parseJson(self, jsonString):
-        return eval(jsonString)  # Hack as not implemented Json Library 
-          
     def __validateTopic(self, topic):
         if(topic):
             pass
@@ -2405,6 +2405,11 @@ class TimeHelper:
 #####Modem Initialization#########################################################################
 class Modem:
     DEFAULT_NTP_PORT = 23
+    MODEM_STATE_SIM_DETECT = 1
+    MODEM_STATE_SIM_PIN = 2
+    MODEM_STATE_INIT_NETWORK = 3
+    MODEM_STATE_SET_GPRS_CONTEXT = 4
+    MODEM_STATE_OK = 5
     
     def __init__(self, settings, onDebugMessageCallBack=None):  
         if(onDebugMessageCallBack is not None and not callable(onDebugMessageCallBack)): raise ValueError('[Modem]:: onDebugMessageCallBack should be a callable object.') 
@@ -2412,7 +2417,8 @@ class Modem:
             self.__onDebugMessageCallBack = onDebugMessageCallBack
             self.__log(INSTAMSG_LOG_LEVEL_INFO, "[Modem]:: Configuring modem...")
             self.__initOptions(settings)
-            self.state = self.__init()
+            self.state = self.MODEM_STATE_SIM_DETECT
+            self.init()
             self.__setPowerMode()
             self.__setFireWall() 
             self.__initGPRSConnection()
@@ -2423,6 +2429,9 @@ class Modem:
             self.__log(INSTAMSG_LOG_LEVEL_INFO, "[Modem]:: Configured successfully with settings: %s" % str(self.settings()))
         except Exception, e:
             raise ModemError("[Modem]:: Error while initializing modem. %s" % str(e))
+        
+    def init(self):
+        self.__init()
         
     def getState(self):
         return self.state
@@ -2510,29 +2519,43 @@ class Modem:
             self.powerMode = at.getPowerMode()
             self.subscriberNumber = at.subscriberNumber()
             self.antennaStatus = at.getAntennaStatus()
+            self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Setting extended AT error code...')
+            if(not at.setExtendedErrorCode()): 
+                self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to set extended AT error code.')
             self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing SIM...')
-            if(not at.initSimDetect(self.simDetectionMode, retry)): 
-                self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize SIM.')
-                return 0
-            self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: SIM Detected.')
-            if(not at.initPin(self.simPin, retry)): 
-                self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to set SIM PIN.')
-                return 0
-            self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: SIM OK.')
-            self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing Network...')
-            if(not at.initNetwork(retry)): 
-                self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize Network.')
-                return 0
-            self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Network OK.')
-            self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing GPRS settings...')
-            if(not at.initGPRS(1, self.gprsApn, self.gprsUserId, self.gprsPwd, retry)): 
-                self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize GPRS context.')
-                return 0
-            self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: GPRS Settings OK.')
-            self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: SIM and GPRS OK.')
-            return 1
+
+            if (self.state == self.MODEM_STATE_SIM_DETECT):
+                if( not at.initSimDetect(self.simDetectionMode, retry)): 
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize SIM.')
+                    return self.state
+                else:
+                    self.state == self.MODEM_STATE_SIM_PIN
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: SIM Detected.')
+            if (self.state == self.MODEM_STATE_SIM_PIN):
+                if(not at.initPin(self.simPin, retry)): 
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to set SIM PIN.')
+                    return self.state
+                else:
+                    self.state == self.MODEM_STATE_INIT_NETWORK
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: SIM OK.')
+            if (self.state == self.MODEM_STATE_INIT_NETWORK):
+                self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing Network...')
+                if(not at.initNetwork(retry)): 
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize Network.')
+                    return self.state
+                else:
+                    self.state == self.MODEM_STATE_SET_GPRS_CONTEXT
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Network OK.')
+            if (self.state == self.MODEM_STATE_SET_GPRS_CONTEXT):
+                self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Checking and initializing GPRS settings...')
+                if(not at.initGPRS(1, self.gprsApn, self.gprsUserId, self.gprsPwd, retry)): 
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Unable to initialize GPRS context.')
+                    return self.state
+                else:
+                    self.state == MODEM_STATE_OK
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: GPRS Settings OK.')
+                    self.__log(INSTAMSG_LOG_LEVEL_INFO, '[Modem]:: Modem OK.')
         except:
-            return 0
             self.__log(INSTAMSG_LOG_LEVEL_ERROR, "[Modem]:: Error configuring modem. Continuing without it...")
     
     def __setNtp(self):
@@ -2635,10 +2658,13 @@ class At:
                    response = '%s\r\n' % r[0] + '\r\n'.join(r[3:])
                 return response
         except self.error, e:
+            print ("AtError, command %s failed. %s\r\n" % (cmd, str(e)))
             raise self.error(str(e))
         except self.timeout, e:
+            print ("AtTimeoutError, command %s failed. %s\r\n" % (cmd, str(e)))
             raise self.timeout(str(e))
         except Exception, e:
+            print ("UnexpectedError, command %s failed. %s\r\n" % (cmd, str(e)))
             raise self.error("UnexpectedError, command %s failed. %s" % (cmd, str(e)))
     
     # Module AT commands
@@ -2745,7 +2771,7 @@ class At:
             self.sendCmd(cmd)
             return mode
         except:
-            return - 1
+            return -1
     
     def getTemperature(self):
         try:
@@ -2760,7 +2786,7 @@ class At:
                 resp = self.sendCmd('AT&K=%d' % value)
             return 1
         except:
-            return - 1
+            return -1
         
     def setCmux(self, mode=0, baudrate=9600):
         try:
@@ -2769,7 +2795,7 @@ class At:
                 resp = self.sendCmd('AT#CMUXSCR=%d,%d' % (mode, baudrate))
             return 1
         except:
-            return - 1
+            return -1
         
     def getAntennaStatus(self):
     # 0 - antenna connected.
@@ -2779,7 +2805,7 @@ class At:
         try:
             return int(self.sendCmd('AT#GSMAD=3', 10).split('\r\n')[1].split(':')[1])
         except:
-            return - 1
+            return -1
         
     def getActiveScript(self):
         resp = self.sendCmd('AT#ESCRIPT?', 1).split('\r\n')
@@ -2887,9 +2913,9 @@ class At:
             try:
                 imei = self.sendCmd('AT+CGSN').split('\r\n')[1]
                 if(imei): break
-                MOD.sleep(50)
+                time.sleep(5)
             except:
-                MOD.sleep(50)
+                time.sleep(5)
                 continue
         return imei
     
@@ -2908,9 +2934,9 @@ class At:
                     self.sendCmd('AT#SIMDET=' + str(simDetectMode) , 5)
                     success = 1
                     break
-                MOD.sleep(50)
+                time.sleep(5)
             except:
-                MOD.sleep(50)
+                time.sleep(5)
                 continue
         return success
     
@@ -2928,12 +2954,21 @@ class At:
                     self.sendCmd('AT+CPIN=' + pin, 5)
                     success = 1
                     break
-                MOD.sleep(50)
+                time.sleep(5)
             except:
-                MOD.sleep(50)
+                time.sleep(5)
                 continue
         return success
     
+    def setExtendedErrorCode(self):
+        try:
+            response = self.sendCmd('AT+CMEE?', 5)
+            if (response.find('+CMEE: 0') > 0):
+                self.sendCmd('AT+CMEE=2', 5)
+            return 1
+        except:
+            return 0
+        
     def initNetwork(self, retry=20):
         success = 0
         if(retry <= 0): retry = 1
@@ -2941,12 +2976,12 @@ class At:
             retry = retry - 1
             try:
                 response = self.sendCmd('AT+CREG?', 5)
-                if (response.find('0,1') > 0 or response.find('0,5') > 0):
+                if (response.find('+CREG: 0,1') > 0 or response.find('+CREG: 0,5') > 0):
                     success = 1
                     break
-                MOD.sleep(50)
+                time.sleep(5)
             except:
-                MOD.sleep(50)
+                time.sleep(5)
                 continue
         return success  
     
@@ -2959,8 +2994,8 @@ class At:
     def initGPRS(self, pdpContextId=1, apn='', userid='', passw='', retry=20):
         success = 0
         if(retry <= 0): retry = 1
-        MOD.sleep(10)
         while (retry > 0):
+            time.sleep(3)
             retry = retry - 1
             try:
                 self.sendCmd('AT+CGDCONT=%d,"IP","%s";#USERID="%s";#PASSW="%s"' % (pdpContextId, apn, userid, passw))    
@@ -2969,7 +3004,6 @@ class At:
                 success = 1
                 break
             except:
-                MOD.sleep(10)
                 continue
         return success  
     
@@ -2978,15 +3012,14 @@ class At:
         success = 0
         if(pdpContextId > 5 or pdpContextId < 1): return 0
         if(retry <= 0): retry = 1
-        MOD.sleep(10)
         while (retry > 0):
+            time.sleep(3)
             retry = retry - 1
             try:
                 self.sendCmd('AT#SGACT=%d,1' % pdpContextId, 1, 'IP')
                 success = 1
                 break
             except:
-                MOD.sleep(10)
                 continue
         return success  
     
@@ -2996,13 +3029,13 @@ class At:
         if(pdpContextId > 5 or pdpContextId < 1): return 0
         if(retry <= 0): retry = 1
         while (retry > 0):
+            time.sleep(3)
             retry = retry - 1
             try:
                 self.sendCmd('AT#SGACT=%d,0' % pdpContextId, 1)
                 success = 1
                 break
             except:
-                MOD.sleep(10)
                 continue
         return success 
     
@@ -3017,12 +3050,12 @@ class At:
         status = 0
         if(retry <= 0): retry = 1
         while (retry > 0):
+            time.sleep(3)
             retry = retry - 1
             try:
-                if(self.sendCmd('AT#SGACT?', 2).find('#SGACT: %d,1' % pdpContextId) > 0): status = 1
+                if(self.sendCmd('AT#SGACT?', 5).find('#SGACT: %d,1' % pdpContextId) > 0): status = 1
                 break
             except:
-                MOD.sleep(10)
                 continue
         return status  
     
@@ -3032,15 +3065,13 @@ class At:
             status = 0
             if(retry <= 0): retry = 1
             status = self.getGPRSContextStatus(pdpContextId, 1)
-            while((status in (0, 2) or drop) and retry > 0):
+            while((not status or drop) and retry > 0):
                 retry = retry - 1
                 if(status == 0):
                     self.activateGPRSContext(1)
                 elif(status == 1 and drop == 1):
                     self.deactivateGPRSContext(pdpContextId, 1)
                     self.activateGPRSContext(pdpContextId, 1)
-                elif(status == 2):
-                    MOD.sleep(10)
                 drop = 0
                 status = self.getGPRSContextStatus(pdpContextId, 1)
             return status
@@ -3148,7 +3179,7 @@ class At:
     
     def suspendSocket(self):   
         self.sendCmd('+++')
-        MOD.sleep(20)
+        time.sleep(2)
     
     def resumeSocket(self, connId,ssl=0):
         if(ssl):
