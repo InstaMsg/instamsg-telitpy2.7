@@ -196,7 +196,7 @@ class InstaMsg:
             try:
                 def _resultHandler(result):
                     if(result.succeeded()):
-                        for topic in topic:
+                        for topic in topics:
                             if(self.__msgHandlers.has_key(topic)):
                                 del self.__msgHandlers[topic]
                     resultHandler(result)
